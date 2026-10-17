@@ -104,7 +104,7 @@ Any static server works too, for example `python -m http.server`.
 - upgrade rolls: no duplicates, no maxed upgrades, rarity distribution;
 - PRNG uniformity, angle wrapping, and frame-rate-independent damping.
 
-[GitHub Actions](.github/workflows/ci.yml) runs the tests on Node 20 and 22 for every push and PR, then deploys `main` to GitHub Pages.
+[GitHub Actions](.github/workflows/ci.yml) runs the tests on Node 22 and 24 for every push and PR, then deploys `main` to GitHub Pages.
 
 ## Project structure
 
