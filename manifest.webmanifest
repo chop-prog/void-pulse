@@ -1,0 +1,14 @@
+{
+  "name": "VOID PULSE",
+  "short_name": "VOID PULSE",
+  "description": "Neon twin-stick roguelite built from scratch in vanilla JavaScript.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "fullscreen",
+  "orientation": "landscape",
+  "background_color": "#04050b",
+  "theme_color": "#04050b",
+  "icons": [
+    { "src": "assets/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}

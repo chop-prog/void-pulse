@@ -1,0 +1,16 @@
+{
+  "name": "void-pulse",
+  "version": "1.0.0",
+  "description": "Neon twin-stick roguelite built from scratch in vanilla JavaScript — custom engine, zero dependencies.",
+  "type": "module",
+  "private": true,
+  "license": "MIT",
+  "scripts": {
+    "start": "node scripts/serve.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": ["game", "canvas", "web-audio", "roguelite", "twin-stick", "vanilla-js", "game-engine"]
+}

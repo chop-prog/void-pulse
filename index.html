@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+  <title>VOID PULSE — neon twin-stick roguelite</title>
+  <meta name="description" content="A neon twin-stick roguelite built from scratch in vanilla JavaScript: custom engine, spring-mass warp grid, synthesized audio, zero dependencies.">
+  <meta name="theme-color" content="#04050b">
+  <meta property="og:title" content="VOID PULSE">
+  <meta property="og:description" content="Neon twin-stick roguelite. Custom engine, zero dependencies.">
+  <link rel="icon" href="assets/icon.svg" type="image/svg+xml">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@600;800;900&family=Rajdhani:wght@500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <canvas id="game" aria-label="Game playfield"></canvas>
+  <div id="vignette" aria-hidden="true"></div>
+  <div id="hurt" aria-hidden="true"></div>
+
+  <!-- HUD -->
+  <header id="hud">
+    <div class="hud-left">
+      <div id="score" class="score">0</div>
+      <div id="mult" class="mult">×1</div>
+    </div>
+    <div class="hud-center">
+      <div id="wave" class="wave">Wave 1</div>
+      <div id="boss" class="boss" hidden>
+        <div class="boss-name">Hydra Core</div>
+        <div class="bar"><i id="boss-fill"></i></div>
+      </div>
+    </div>
+    <div class="hud-right">
+      <div class="pips-row"><span class="label">Lives</span><span id="lives" class="pips"></span></div>
+      <div class="pips-row"><span class="label">Bombs</span><span id="bombs" class="pips"></span></div>
+      <div id="dash" class="dash"><span class="label">Dash</span><span class="track"><i id="dash-fill"></i></span></div>
+    </div>
+    <button id="btn-pause-hud" class="pause-btn" aria-label="Pause">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14M16 5v14"/></svg>
+    </button>
+  </header>
+
+  <div id="banner" role="status" aria-live="polite">
+    <div id="banner-title"></div>
+    <div id="banner-sub"></div>
+  </div>
+
+  <!-- Menu -->
+  <section id="screen-menu" class="screen active" aria-label="Main menu">
+    <div class="menu">
+      <p class="kicker">A neon twin-stick roguelite</p>
+      <h1 class="logo" data-text="VOID PULSE">VOID PULSE</h1>
+      <div class="menu-actions">
+        <button id="btn-play" class="btn primary">Play</button>
+        <button id="btn-daily" class="btn">Daily run <span id="daily-tag" class="tag"></span></button>
+      </div>
+      <p class="best">Best <b id="best-standard">0</b> <span class="sep">/</span> Today's daily <b id="best-daily">0</b></p>
+      <div class="controls">
+        <div><h3>Keyboard + mouse</h3><p><kbd>WASD</kbd> move · <kbd>Mouse</kbd> aim &amp; fire<br><kbd>Shift</kbd> dash · <kbd>Space</kbd>/<kbd>RMB</kbd> bomb · <kbd>Esc</kbd> pause</p></div>
+        <div><h3>Gamepad</h3><p>Left stick move · Right stick aim &amp; fire<br><kbd>RB</kbd> dash · <kbd>LB</kbd> bomb · <kbd>Start</kbd> pause</p></div>
+        <div><h3>Touch</h3><p>Left thumb moves · Right thumb aims &amp; fires<br>Buttons for dash and bomb</p></div>
+      </div>
+    </div>
+    <footer class="credits">Vanilla JS · Canvas 2D · Web Audio · zero dependencies · <kbd>`</kbd> for debug overlay</footer>
+  </section>
+
+  <!-- Upgrade -->
+  <section id="screen-upgrade" class="screen" aria-label="Choose an augment">
+    <div class="upgrade">
+      <p class="kicker">Wave <span id="up-wave">1</span> cleared</p>
+      <h2>Choose an augment</h2>
+      <div id="cards" class="cards"></div>
+      <p class="hint">Press <kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> or click</p>
+    </div>
+  </section>
+
+  <!-- Pause -->
+  <section id="screen-pause" class="screen" aria-label="Paused">
+    <div class="panel">
+      <h2>Paused</h2>
+      <button id="btn-resume" class="btn primary">Resume</button>
+      <button id="btn-restart" class="btn">Restart run</button>
+      <button id="btn-sound" class="btn toggle">Sound: On</button>
+      <button id="btn-shake" class="btn toggle">Screen shake: On</button>
+      <button id="btn-quality" class="btn toggle">Effects: High</button>
+      <button id="btn-quit" class="btn ghost">Quit to menu</button>
+    </div>
+  </section>
+
+  <!-- Game over -->
+  <section id="screen-over" class="screen" aria-label="Game over">
+    <div class="panel wide">
+      <p id="over-mode" class="kicker">Standard run</p>
+      <h2 class="glitch" data-text="Signal lost">Signal lost</h2>
+      <div id="over-score" class="final-score">0</div>
+      <div id="over-best" class="new-best" hidden>New best</div>
+      <div id="over-stats" class="stats"></div>
+      <div id="over-build" class="build"></div>
+      <div class="row">
+        <button id="btn-retry" class="btn primary">Retry</button>
+        <button id="btn-copy" class="btn">Copy result</button>
+        <button id="btn-menu" class="btn ghost">Menu</button>
+      </div>
+    </div>
+  </section>
+
+  <div id="touch" hidden>
+    <button class="touch-btn" data-action="dash" aria-label="Dash">Dash</button>
+    <button class="touch-btn bomb" data-action="bomb" aria-label="Bomb">Bomb</button>
+  </div>
+
+  <pre id="debug" hidden></pre>
+
+  <noscript><p class="noscript">VOID PULSE needs JavaScript to run.</p></noscript>
+  <script type="module" src="src/main.js"></script>
+</body>
+</html>
