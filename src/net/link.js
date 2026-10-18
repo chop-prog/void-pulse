@@ -17,6 +17,9 @@ const ICE_SERVERS = [
   { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] },
   { urls: 'stun:stun.cloudflare.com:3478' },
 ];
+/** Bumped whenever the two sides could misunderstand each other; both must match to connect. */
+export const PROTOCOL = 3;
+export const OLD_VERSION_HINT = 'Reload the page (on a phone: close the tab and open the link again).';
 const ANSWER_TIMEOUT = 15000;
 const DIRECT_TIMEOUT = 6000;
 const RELAY_TIMEOUT = 12000;
@@ -137,6 +140,7 @@ export async function hostRoom(code, { onGuest, onStatus } = {}) {
   const signal = await Signal.open(code);
   let connected = null;
   let attempt = null;
+  const mismatched = new Set();
 
   const run = async (msg) => {
     const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
@@ -168,8 +172,8 @@ export async function hostRoom(code, { onGuest, onStatus } = {}) {
       await pc.setLocalDescription(await pc.createAnswer());
       await iceGathered(pc);
       if (me.cancelled) return;
-      await signal.send(`g-${msg.from}`, { kind: 'answer', sdp: pc.localDescription.toJSON(), brokers: signal.brokers });
-      const winner = await timeout(Promise.race([direct, relayRequest]), DIRECT_TIMEOUT + RELAY_TIMEOUT, 'join timed out');
+      await signal.send(`g-${msg.from}`, { kind: 'answer', v: PROTOCOL, sdp: pc.localDescription.toJSON(), brokers: signal.brokers });
+      const winner = await timeout(Promise.race([direct, relayRequest]), DIRECT_TIMEOUT + RELAY_TIMEOUT, 'no-relay-request');
       if (me.cancelled) return;
       let link;
       if (winner === 'direct') {
@@ -202,6 +206,13 @@ export async function hostRoom(code, { onGuest, onStatus } = {}) {
       return;
     }
     if (msg.kind !== 'offer') return;
+    if (msg.v !== PROTOCOL) {
+      // An older (or newer) build: tell the guest, once per guest, and tell the host's lobby.
+      signal.send(`g-${msg.from}`, { kind: 'version', v: PROTOCOL });
+      if (!mismatched.has(msg.from)) onStatus?.('version', msg.v);
+      mismatched.add(msg.from);
+      return;
+    }
     if (connected && !connected.closed) {
       signal.send(`g-${msg.from}`, { kind: 'busy' });
       return;
@@ -231,16 +242,18 @@ export async function joinRoom(code, { onStatus } = {}) {
       signal.listen(`g-${me}`, (m) => {
         if (m.kind === 'answer') resolve(m);
         else if (m.kind === 'busy') reject(new Error('That room already has two players.'));
+        else if (m.kind === 'version') reject(new Error(`Your friend has a different version of the game. Both of you: ${OLD_VERSION_HINT}`));
       });
     });
     await pc.setLocalDescription(await pc.createOffer());
     await iceGathered(pc);
     onStatus?.('Looking for the room…');
-    const offer = () => ({ kind: 'offer', from: me, sdp: pc.localDescription.toJSON(), brokers: signal.brokers });
+    const offer = () => ({ kind: 'offer', v: PROTOCOL, from: me, sdp: pc.localDescription.toJSON(), brokers: signal.brokers });
     signal.send('host', offer());
     resend = setInterval(() => signal.send('host', offer()), RESEND_EVERY);
     const ans = await timeout(answer, ANSWER_TIMEOUT, 'Room not found. Check the code, and that your friend still has the room open.');
     clearInterval(resend);
+    if (ans.v !== PROTOCOL) throw new Error(`Your friend has an older version of the game. Ask them to reload the page, then try again.`);
 
     onStatus?.('Room found. Connecting…');
     await pc.setRemoteDescription(ans.sdp);

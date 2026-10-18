@@ -5,7 +5,10 @@ import { AudioEngine } from './engine/audio.js';
 import { Game } from './game/game.js';
 import { UI } from './ui.js';
 import { storage } from './storage.js';
-import { hostRoom, joinRoom } from './net/link.js';
+import { hostRoom, joinRoom, OLD_VERSION_HINT } from './net/link.js';
+
+// Shown in the co-op lobby so two players can check they run the same build.
+export const BUILD = 'build 5 · 2026-10-18';
 import { CoopSession } from './net/coop.js';
 import { newRoomCode, parseRoomCode } from './net/signal.js';
 
@@ -60,10 +63,16 @@ const lobby = {
           ui.coopReady(true);
           audio.ui();
         },
-        onStatus: (kind) => {
+        onStatus: (kind, detail) => {
           if (kind === 'connecting') ui.coopStatus('Your friend is connecting…', 'wait');
           else if (kind === 'relay') ui.coopStatus('Direct connection blocked by the network. Connecting through the relay…', 'wait');
-          else if (kind === 'failed') ui.coopStatus('Your friend could not connect. They can simply try again; the room stays open.', 'bad');
+          else if (kind === 'version') ui.coopStatus(`Your friend has an older version of the game. Ask them to: ${OLD_VERSION_HINT}`, 'bad');
+          else if (kind === 'failed') {
+            // No relay request after a failed direct attempt usually means the guest runs an old build.
+            ui.coopStatus(detail?.message === 'no-relay-request'
+              ? `Your friend could not connect. They may have an old version of the game: ask them to ${OLD_VERSION_HINT.toLowerCase()}`
+              : 'Your friend could not connect. They can simply try again; the room stays open.', 'bad');
+          }
         },
       });
       if (this.code !== code) return room.close(); // went back while connecting
@@ -225,8 +234,16 @@ document.addEventListener('visibilitychange', () => {
 });
 
 if ('serviceWorker' in navigator && location.protocol === 'https:') {
-  navigator.serviceWorker.register('./sw.js').catch(() => {});
+  // Always check sw.js itself past the HTTP cache, and when a new version takes over while the
+  // player is idle in a menu, reload so both co-op pilots end up on the same build.
+  navigator.serviceWorker.register('./sw.js', { updateViaCache: 'none' }).catch(() => {});
+  const hadController = !!navigator.serviceWorker.controller;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (hadController && game.state === 'menu' && !game.net && !lobby.room) location.reload();
+  });
 }
+const buildTag = document.getElementById('coop-build');
+if (buildTag) buildTag.textContent = BUILD;
 
 // Invite links: ?room=CODE opens the co-op screen and joins straight away.
 const invited = parseRoomCode(location.search);

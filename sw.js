@@ -1,6 +1,7 @@
-// Offline support: stale-while-revalidate for same-origin assets.
-// Bump VERSION to invalidate old caches on deploy.
-const VERSION = 'void-pulse-v4';
+// Offline support. Network first: online players always run the latest deploy (co-op needs both
+// pilots on the same version), revalidating past the browser's HTTP cache; the cache is only the
+// offline fallback. Bump VERSION to drop old caches on deploy.
+const VERSION = 'void-pulse-v5';
 const CORE = [
   './',
   './index.html',
@@ -47,16 +48,14 @@ self.addEventListener('activate', (e) => {
 self.addEventListener('fetch', (e) => {
   const { request } = e;
   if (request.method !== 'GET' || new URL(request.url).origin !== location.origin) return;
-  e.respondWith(
-    caches.open(VERSION).then(async (cache) => {
-      const cached = await cache.match(request);
-      const network = fetch(request)
-        .then((res) => {
-          if (res.ok) cache.put(request, res.clone());
-          return res;
-        })
-        .catch(() => cached);
-      return cached || network;
-    }),
-  );
+  e.respondWith((async () => {
+    const cache = await caches.open(VERSION);
+    try {
+      const res = await fetch(request, { cache: 'no-cache' });
+      if (res.ok) cache.put(request, res.clone());
+      return res;
+    } catch {
+      return (await cache.match(request, { ignoreSearch: request.mode === 'navigate' })) ?? Response.error();
+    }
+  })());
 });

@@ -747,3 +747,5 @@ body.touch .hint { display: none; }
   .card[data-rarity='legendary'] { animation: card-in 0.01s forwards; }
   .spinner, .coop-status.wait::before { animation: none; }
 }
+
+.coop-build { margin: 0; font-size: 12px; letter-spacing: 0.15em; text-transform: uppercase; color: #59618a; }
