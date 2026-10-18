@@ -1,6 +1,6 @@
 // Offline support: stale-while-revalidate for same-origin assets.
 // Bump VERSION to invalidate old caches on deploy.
-const VERSION = 'void-pulse-v3';
+const VERSION = 'void-pulse-v4';
 const CORE = [
   './',
   './index.html',

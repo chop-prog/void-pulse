@@ -5,8 +5,8 @@ import { weightedSample } from '../engine/math.js';
 export const RARITY = {
   common: { weight: 10, label: 'Common' },
   rare: { weight: 4.5, label: 'Rare' },
-  epic: { weight: 0.75, label: 'Epic' },
-  legendary: { weight: 0.2, label: 'Legendary' },
+  epic: { weight: 0.55, label: 'Epic' },
+  legendary: { weight: 0.14, label: 'Legendary' },
 };
 
 /** Legendaries only enter the pool once a run has proven itself. */
@@ -37,23 +37,23 @@ export const UPGRADES = [
     icon: 'M12 3l5 9H7zM9 15l-1 5M12 15v6M15 15l1 5', apply: (p) => { p.stats.moveSpeed *= 1.12; } },
   { id: 'dash', name: 'Phase Drive', desc: 'Dash cooldown −25%', rarity: 'common', max: 3,
     icon: 'M3 12h9M5 8h6M5 16h6M14 6l6 6-6 6', apply: (p) => { p.stats.dashCooldown *= 0.75; } },
-  { id: 'orbital', name: 'Orbital Drone', desc: '+1 drone that shreds enemies and bullets', rarity: 'epic', max: 4,
+  { id: 'orbital', name: 'Orbital Drone', desc: '+1 drone that chips enemies and blocks bullets', rarity: 'epic', max: 3,
     icon: 'M9 12a3 3 0 1 0 6 0a3 3 0 1 0-6 0M3 12a9 9 0 0 1 18 0M19 12a2 2 0 1 0 4 0a2 2 0 1 0-4 0', apply: (p) => { p.stats.orbitals += 1; } },
-  { id: 'chain', name: 'Arc Conductor', desc: 'Kills have +20% chance to arc lightning', rarity: 'epic', max: 4,
-    icon: 'M13 2L5 14h6l-2 8 8-12h-6z', apply: (p) => { p.stats.chain += 0.2; } },
-  { id: 'rear', name: 'Rear Guns', desc: 'Every volley also fires +1 shot behind you', rarity: 'epic', max: 2,
+  { id: 'chain', name: 'Arc Conductor', desc: 'Kills have +15% chance to arc lightning', rarity: 'epic', max: 3,
+    icon: 'M13 2L5 14h6l-2 8 8-12h-6z', apply: (p) => { p.stats.chain += 0.15; } },
+  { id: 'rear', name: 'Rear Guns', desc: 'Every volley also fires a weaker shot behind you', rarity: 'epic', max: 2,
     icon: 'M12 3v18M12 3l-4 4M12 3l4 4M12 21l-4-4M12 21l4-4', apply: (p) => { p.stats.rear += 1; } },
-  { id: 'nova', name: 'Nova Pulse', desc: 'Emit a damaging shockwave every few seconds', rarity: 'epic', max: 3,
+  { id: 'nova', name: 'Nova Pulse', desc: 'A small shockwave every 7.5 s (faster per level)', rarity: 'epic', max: 3,
     icon: 'M12 12m-2 0a2 2 0 1 0 4 0a2 2 0 1 0-4 0M5 12a7 7 0 0 1 14 0M2 12a10 10 0 0 1 20 0', apply: (p) => { p.stats.nova += 1; } },
-  { id: 'shield', name: 'Aegis Shield', desc: 'A shield absorbs one hit, then recharges', rarity: 'epic', max: 2,
+  { id: 'shield', name: 'Aegis Shield', desc: 'A shield absorbs one hit, recharges in 18 s', rarity: 'epic', max: 2,
     icon: 'M12 3l8 3v6c0 4.5-3.4 8-8 9-4.6-1-8-4.5-8-9V6z', apply: (p) => { p.stats.shield += 1; p.shield = 1; p.shieldT = 0; } },
-  { id: 'storm', name: 'Bullet Storm', desc: 'Every 4th volley erupts in a ring of 16 shots', rarity: 'legendary', max: 1,
+  { id: 'storm', name: 'Bullet Storm', desc: 'Every 6th volley erupts in a ring of 12 shots', rarity: 'legendary', max: 1,
     icon: 'M12 2v4M12 18v4M2 12h4M18 12h4M4.9 4.9l2.8 2.8M16.3 16.3l2.8 2.8M4.9 19.1l2.8-2.8M16.3 7.7l2.8-2.8M9 12a3 3 0 1 0 6 0a3 3 0 1 0-6 0',
     apply: (p) => { p.stats.storm = 1; } },
-  { id: 'phoenix', name: 'Phoenix Core', desc: 'Once per run, a fatal hit revives you in a blast', rarity: 'legendary', max: 1,
+  { id: 'phoenix', name: 'Phoenix Core', desc: 'Once per run, survive a fatal hit with a small blast', rarity: 'legendary', max: 1,
     icon: 'M12 21c-4-2-6-5-6-8 0-2 1-4 3-5-.5 2 .5 3 1.5 3C10 8 11 5 14 3c-.5 3 1 4.5 2.5 6 1 1 1.5 2.5 1.5 4 0 3-2 6-6 8z',
     apply: (p) => { p.stats.phoenix = 1; } },
-  { id: 'chronos', name: 'Chronos', desc: 'Dashing slows every enemy for 2.5 s', rarity: 'legendary', max: 1,
+  { id: 'chronos', name: 'Chronos', desc: 'Dashing slows enemies for 1.8 s (once per 6 s)', rarity: 'legendary', max: 1,
     icon: 'M12 12m-9 0a9 9 0 1 0 18 0a9 9 0 1 0-18 0M12 7v5l3 2M5 3L2 6M19 3l3 3', apply: (p) => { p.stats.chronos = 1; } },
   { id: 'magnet', name: 'Gravity Well', desc: '+50% shard pickup radius', rarity: 'common', max: 3,
     icon: 'M6 4v8a6 6 0 0 0 12 0V4M6 8h4M14 8h4', apply: (p) => { p.stats.magnet *= 1.5; } },
@@ -72,8 +72,8 @@ export function availableUpgrades(owned, wave = Infinity) {
 
 /**
  * Offer `count` distinct, non-maxed upgrades, weighted by rarity, with at most one epic or
- * legendary among them. Measured with these weights: an epic shows up in about 1 offer in 10,
- * a legendary in about 1 in 60 once it is unlocked (see tests/upgrades.test.js).
+ * legendary among them. Measured with these weights: an epic shows up in about 1 offer in 12,
+ * a legendary in about 1 in 85 once it is unlocked (see tests/upgrades.test.js).
  */
 export function rollUpgrades(owned, rng, count = 3, wave = Infinity) {
   let pool = availableUpgrades(owned, wave);

@@ -23,7 +23,10 @@ export const BASE_STATS = Object.freeze({
 });
 
 export const DASH_TIME = 0.16;
-export const SHIELD_RECHARGE = 12; // seconds at shield level 1
+export const SHIELD_RECHARGE = 18; // seconds at shield level 1
+export const STORM_EVERY = 6; // Bullet Storm: every Nth volley…
+export const STORM_SHOTS = 12; // …fires this many shots in a ring
+const REAR_DAMAGE = 0.6;
 export const PLAYER_STYLE = [
   { name: 'P1', hull: '#eaffff', glow: '#3df2ff', fill: 'rgba(80, 220, 255, 0.25)', trail: ['#ff9b3d', '#ffd27a'], bullet: '#5ff3ff' },
   { name: 'P2', hull: '#fff0fb', glow: '#ff4fd8', fill: 'rgba(255, 79, 216, 0.22)', trail: ['#b46bff', '#ff9bf0'], bullet: '#ff8af0' },
@@ -56,7 +59,7 @@ export function tickPlayer(g, p, dt) {
     g.addRing(p.x, p.y, { maxR: 60, life: 0.35, color: PLAYER_STYLE[p.slot].glow, width: 3 });
   }
   if (s.nova > 0 && (p.novaT -= dt) <= 0) {
-    p.novaT = Math.max(2.5, 7 - s.nova * 1.5);
+    p.novaT = Math.max(4.5, 9 - s.nova * 1.5);
     g.novaBlast(p);
   }
 }
@@ -132,7 +135,7 @@ export function trailPlayer(g, p, dt) {
   }
 }
 
-function bullet(g, p, a, crit) {
+function bullet(g, p, a, crit, scale = 1) {
   const s = p.stats;
   const cos = Math.cos(a);
   const sin = Math.sin(a);
@@ -140,7 +143,7 @@ function bullet(g, p, a, crit) {
     x: p.x + cos * 16, y: p.y + sin * 16,
     vx: cos * s.bulletSpeed, vy: sin * s.bulletSpeed,
     r: crit ? 6 : 4,
-    dmg: s.damage * (crit ? 2.5 : 1),
+    dmg: s.damage * (crit ? 2.5 : 1) * scale,
     crit,
     owner: p.slot,
     pierce: s.pierce,
@@ -156,11 +159,11 @@ function firePlayer(g, p) {
   const n = s.projectiles;
   const spread = n > 1 ? Math.min(0.14, 0.5 / n) : 0;
   for (let i = 0; i < n; i++) bullet(g, p, p.aim + (i - (n - 1) / 2) * spread + (Math.random() - 0.5) * 0.03, Math.random() < s.crit);
-  for (let i = 0; i < s.rear; i++) bullet(g, p, p.aim + Math.PI + (i - (s.rear - 1) / 2) * 0.16, Math.random() < s.crit);
+  for (let i = 0; i < s.rear; i++) bullet(g, p, p.aim + Math.PI + (i - (s.rear - 1) / 2) * 0.16, Math.random() < s.crit, REAR_DAMAGE);
   p.volleys++;
-  if (s.storm && p.volleys % 4 === 0) {
-    for (let i = 0; i < 16; i++) bullet(g, p, p.aim + (i * TAU) / 16, Math.random() < s.crit);
-    g.particles.emit(p.x, p.y, { count: 16, color: '#ffd84d', speed: 320, life: 0.3 });
+  if (s.storm && p.volleys % STORM_EVERY === 0) {
+    for (let i = 0; i < STORM_SHOTS; i++) bullet(g, p, p.aim + (i * TAU) / STORM_SHOTS, Math.random() < s.crit);
+    g.particles.emit(p.x, p.y, { count: STORM_SHOTS, color: '#ffd84d', speed: 320, life: 0.3 });
   }
   g.particles.emit(p.x + Math.cos(p.aim) * 18, p.y + Math.sin(p.aim) * 18, {
     count: 2, color: '#9ff7ff', speed: 260, speedMin: 80, life: 0.12, lifeMin: 0.05, angle: p.aim, spread: 0.7,

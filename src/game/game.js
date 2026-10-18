@@ -24,9 +24,11 @@ const NEW_THREAT = {
 };
 // Sounds the co-op guest should hear too (music intensity is derived locally instead).
 const AUDIO_EVENTS = ['shoot', 'hit', 'explode', 'pickup', 'spawn', 'enemyShoot', 'dash', 'bomb', 'playerHit', 'death', 'upgrade', 'waveClear', 'waveStart'];
-const CHRONOS_TIME = 2.5;
-const CHRONOS_SCALE = 0.45;
-const NOVA_RADIUS = 230;
+export const CHRONOS_TIME = 1.8;
+export const CHRONOS_SCALE = 0.6; // enemy speed while slowed
+export const CHRONOS_COOLDOWN = 6;
+const NOVA_RADIUS = 190;
+const PHOENIX_RADIUS = 600;
 
 /** Co-op difficulty: every extra pilot adds 60% enemy HP (75% for bosses). Wave sizes scale in waves.js. */
 export const coopHp = (players, boss = false) => 1 + (boss ? 0.75 : 0.6) * (players - 1);
@@ -64,6 +66,7 @@ export class Game {
     this.score = 0;
     this.mult = 1;
     this.slowT = 0;
+    this.chronosReady = 0;
     this._q = [];
     this._qc = [];
     this._chainDepth = 0;
@@ -100,6 +103,7 @@ export class Game {
     this.director = null;
     this.vacuum = false;
     this.slowT = 0;
+    this.chronosReady = 0;
     this.localFx.particles.clear();
   }
 
@@ -568,7 +572,7 @@ export class Game {
     if (!best) return;
     this.addBolt(jagged(src.x, src.y, best.x, best.y));
     this._chainDepth++;
-    this.damageEnemy(best, killer.stats.damage * 2 + 1, 0, 0, false, killer.slot);
+    this.damageEnemy(best, killer.stats.damage * 1.5 + 1, 0, 0, false, killer.slot);
     this._chainDepth--;
   }
 
@@ -702,7 +706,7 @@ export class Game {
           const rr = e.r + 9;
           if (dist2(x, y, e.x, e.y) > rr * rr) continue;
           e.orbCd = 0.2;
-          this.damageEnemy(e, 1.5 * p.stats.damage, -Math.sin(a) * 400, Math.cos(a) * 400, false, p.slot);
+          this.damageEnemy(e, 1.2 * p.stats.damage, -Math.sin(a) * 400, Math.cos(a) * 400, false, p.slot);
         }
         const eb = this.enemyBullets;
         for (let j = eb.length - 1; j >= 0; j--) {
@@ -786,8 +790,12 @@ export class Game {
     if (p.stats.phoenix && !p.phoenixUsed) {
       p.phoenixUsed = true;
       p.lives = 1;
-      p.invuln = 3;
-      this.detonateBomb(p, { free: true });
+      p.invuln = 2;
+      // A small blast, not a free full-screen bomb.
+      this.addRing(p.x, p.y, { maxR: PHOENIX_RADIUS, life: 0.6, color: '#ff9b3d', width: 8, kill: true, owner: p.slot });
+      this.grid.applyForce(p.x, p.y, PHOENIX_RADIUS, 2000);
+      this.addTrauma(0.8);
+      this.audio.bomb();
       this.particles.emit(p.x, p.y, { count: 140, color: '#ff9b3d', speed: 900, speedMin: 200, life: 1.3, size: 3, drag: 1.4 });
       this.banner('Phoenix Core', `${this.coop ? `${style.name} ` : ''}reborn from the ashes`, 'good');
       return;
@@ -814,9 +822,10 @@ export class Game {
       this.particles.emit(p.x, p.y, { count: 24, color: PLAYER_STYLE[p.slot].glow, speed: 300, life: 0.4, angle: Math.atan2(-p.dashY, -p.dashX), spread: 1.2 });
       this.grid.applyForce(p.x, p.y, 160, 500);
     }
-    if (this.role !== 'guest' && p.stats.chronos) {
-      if (this.slowT <= 0) this.addRing(p.x, p.y, { maxR: 700, life: 0.7, color: '#7d9cff', width: 4 });
+    if (this.role !== 'guest' && p.stats.chronos && this.time >= this.chronosReady) {
+      this.addRing(p.x, p.y, { maxR: 700, life: 0.7, color: '#7d9cff', width: 4 });
       this.slowT = CHRONOS_TIME;
+      this.chronosReady = this.time + CHRONOS_COOLDOWN;
     }
   }
 
@@ -842,7 +851,7 @@ export class Game {
     const color = PLAYER_STYLE[p.slot].glow;
     this.addRing(p.x, p.y, { maxR: NOVA_RADIUS, life: 0.35, color, width: 5 });
     this.grid.applyForce(p.x, p.y, NOVA_RADIUS, 900);
-    const dmg = 3 + p.stats.damage * 1.5;
+    const dmg = 2 + p.stats.damage;
     for (const e of this.enemies) {
       if (e.dead || dist2(e.x, e.y, p.x, p.y) > NOVA_RADIUS * NOVA_RADIUS) continue;
       this.damageEnemy(e, dmg, (e.x - p.x) * 6, (e.y - p.y) * 6, false, p.slot);

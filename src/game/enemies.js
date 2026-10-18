@@ -1,7 +1,7 @@
 // Enemy archetypes. Each one is a small behaviour object: init / update / draw (+ optional onDeath).
 // `g` is the Game instance; behaviours only touch it through a handful of well-defined methods.
 
-import { TAU, clamp } from '../engine/math.js';
+import { TAU, clamp, angleDiff } from '../engine/math.js';
 
 function steer(e, tx, ty, speed, accel, dt) {
   const dx = tx - e.x;
@@ -623,8 +623,281 @@ export const ENEMIES = {
   },
 };
 
+// Prism's mirror copies: fragile, but they keep shooting until cleaned up.
+ENEMIES.decoy = {
+  color: '#d8b4ff', r: 18, hp: 5, score: 100,
+  init(e) {
+    e.data.cd = 1 + Math.random() * 1.5;
+    e.data.a = Math.random() * TAU;
+  },
+  update(e, g, dt) {
+    const d = e.data;
+    d.a += dt * 1.4;
+    e.vx = Math.cos(d.a) * 90;
+    e.vy = Math.sin(d.a) * 90;
+    e.angle += dt * 2;
+    if ((d.cd -= dt) <= 0) {
+      d.cd = 2.2;
+      const p = g.nearestPlayer(e.x, e.y);
+      g.fireEnemyBullet(e.x, e.y, Math.atan2(p.y - e.y, p.x - e.x), 280);
+    }
+  },
+  draw(ctx, e, t, color) {
+    ctx.strokeStyle = color;
+    ctx.globalAlpha = 0.75;
+    ctx.beginPath();
+    poly(ctx, e.x, e.y, e.r, 6, e.angle);
+    poly(ctx, e.x, e.y, e.r * 0.55, 3, -e.angle);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  },
+};
+
+const SERPENT_SEGMENTS = 14;
+const SERPENT_GAP = 30;
+
+/** Remember where the head has been; the body is laid out along this path. */
+function trackTrail(e) {
+  const tr = (e.data.trail ??= [e.x, e.y]);
+  const dx = e.x - tr[tr.length - 2];
+  const dy = e.y - tr[tr.length - 1];
+  if (dx * dx + dy * dy < 36) return;
+  tr.push(e.x, e.y);
+  const keep = ((SERPENT_SEGMENTS + 2) * SERPENT_GAP) / 6;
+  if (tr.length > keep * 2) tr.splice(0, tr.length - keep * 2);
+}
+
+/** Body segment centres, every SERPENT_GAP px back along the trail from the head. */
+export function serpentSegments(e) {
+  const tr = e.data.trail ?? [e.x, e.y];
+  const out = [];
+  let px = e.x;
+  let py = e.y;
+  let need = SERPENT_GAP;
+  for (let i = tr.length - 2; i >= 0 && out.length < SERPENT_SEGMENTS; i -= 2) {
+    let x = tr[i];
+    let y = tr[i + 1];
+    let seg = Math.hypot(x - px, y - py);
+    while (seg >= need && out.length < SERPENT_SEGMENTS) {
+      const k = need / seg;
+      px += (x - px) * k;
+      py += (y - py) * k;
+      out.push([px, py]);
+      seg = Math.hypot(x - px, y - py);
+      need = SERPENT_GAP;
+    }
+    need -= seg;
+    px = x;
+    py = y;
+  }
+  return out;
+}
+
+// Boss 4: a long serpent. Only the head takes damage; the body is a moving wall that
+// fires rib volleys sideways. It hunts the nearest pilot with a sinuous, turn-limited path.
+ENEMIES.serpent = {
+  color: '#3dffc8', r: 32, hp: 1, score: 7000, heavy: true, boss: true, title: 'Void Serpent',
+  sync: ['phase', 'fireT'],
+  init(e, g) {
+    e.maxHp = e.hp = 240 + g.wave * 45;
+    e.angle = Math.PI / 2;
+    e.data = { phase: 1, t: 0, volleyT: 3, fireT: 0, trail: [e.x, e.y - 400, e.x, e.y] };
+  },
+  hits(e, p) {
+    const segs = serpentSegments(e);
+    for (let i = 1; i < segs.length; i++) {
+      const r = 18 - i * 0.5 + p.r * 0.6;
+      if ((segs[i][0] - p.x) ** 2 + (segs[i][1] - p.y) ** 2 < r * r) return true;
+    }
+    return false;
+  },
+  update(e, g, dt) {
+    const d = e.data;
+    const enraged = d.phase === 2;
+    d.t += dt;
+    d.fireT = Math.max(0, d.fireT - dt);
+    if (d.phase === 1 && e.hp < e.maxHp * 0.5) {
+      d.phase = 2;
+      g.bossEnrage(e);
+    }
+    const p = g.nearestPlayer(e.x, e.y);
+    const want = Math.atan2(p.y - e.y, p.x - e.x) + Math.sin(d.t * 2.4) * 0.6;
+    const turn = (enraged ? 2.3 : 1.6) * dt;
+    e.angle += clamp(angleDiff(e.angle, want), -turn, turn);
+    const speed = enraged ? 240 : 175;
+    e.vx = Math.cos(e.angle) * speed;
+    e.vy = Math.sin(e.angle) * speed;
+    trackTrail(e);
+
+    if ((d.volleyT -= dt) <= 0) {
+      d.volleyT = enraged ? 2 : 2.8;
+      d.fireT = 0.35;
+      const segs = serpentSegments(e);
+      for (let i = 2; i < segs.length; i += enraged ? 1 : 2) {
+        const [x0, y0] = segs[i - 1];
+        const [x1, y1] = segs[i];
+        const a = Math.atan2(y1 - y0, x1 - x0) + Math.PI / 2;
+        g.fireEnemyBullet(x1, y1, a, 190);
+        if (enraged) g.fireEnemyBullet(x1, y1, a + Math.PI, 190);
+      }
+      g.audio.enemyShoot();
+    }
+  },
+  onDeath(e, g) {
+    for (const [x, y] of serpentSegments(e)) g.particles.emit(x, y, { count: 18, color: '#3dffc8', speed: 300, life: 0.7 });
+    g.bossDefeated(e);
+  },
+  draw(ctx, e, t, color) {
+    trackTrail(e); // the guest builds its own trail from the heads it sees
+    const d = e.data;
+    const enraged = d.phase === 2;
+    const body = color === '#ffffff' ? color : enraged ? '#9dff3d' : color;
+    const segs = serpentSegments(e);
+    ctx.strokeStyle = body;
+    ctx.lineWidth = 2;
+    ctx.globalAlpha = 0.5;
+    ctx.beginPath();
+    ctx.moveTo(e.x, e.y);
+    for (const [x, y] of segs) ctx.lineTo(x, y);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    segs.forEach(([x, y], i) => circle(ctx, x, y, Math.max(6, 17 - i * 0.6)));
+    ctx.stroke();
+    if (d.fireT > 0) {
+      ctx.globalAlpha = d.fireT / 0.35;
+      ctx.fillStyle = '#d6fff4';
+      ctx.beginPath();
+      segs.forEach(([x, y], i) => circle(ctx, x, y, Math.max(3, 8 - i * 0.3)));
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    const a = e.angle;
+    ctx.moveTo(e.x + Math.cos(a) * e.r * 1.3, e.y + Math.sin(a) * e.r * 1.3);
+    ctx.lineTo(e.x + Math.cos(a + 2.3) * e.r, e.y + Math.sin(a + 2.3) * e.r);
+    ctx.lineTo(e.x + Math.cos(a + Math.PI) * e.r * 0.5, e.y + Math.sin(a + Math.PI) * e.r * 0.5);
+    ctx.lineTo(e.x + Math.cos(a - 2.3) * e.r, e.y + Math.sin(a - 2.3) * e.r);
+    ctx.closePath();
+    for (const s of [-1, 1]) circle(ctx, e.x + Math.cos(a + s * 0.6) * e.r * 0.6, e.y + Math.sin(a + s * 0.6) * e.r * 0.6, 4);
+    ctx.stroke();
+    ctx.lineWidth = 2.5;
+  },
+};
+
+// Boss 5: a crystal that blinks around the arena. It shrinks before every teleport (the tell),
+// bursts on arrival, fires aimed fans, and when enraged splits off shooting mirror copies.
+ENEMIES.prism = {
+  color: '#c48bff', r: 46, hp: 1, score: 7000, heavy: true, boss: true, title: 'Prism',
+  sync: ['phase', 'charge', 'blink'],
+  init(e, g) {
+    e.maxHp = e.hp = 230 + g.wave * 45;
+    e.data = { phase: 1, t: 0, attackT: 1.8, cycle: 0, charge: 0, blink: 0, fans: 0, fanT: 0 };
+  },
+  update(e, g, dt) {
+    const d = e.data;
+    const { W, H } = g.arena;
+    const enraged = d.phase === 2;
+    d.t += dt;
+    d.blink = Math.max(0, d.blink - dt * 2);
+    e.angle += dt * (enraged ? 1.6 : 0.8);
+    if (d.phase === 1 && e.hp < e.maxHp * 0.5) {
+      d.phase = 2;
+      g.bossEnrage(e);
+    }
+    steer(e, W / 2 + Math.cos(d.t * 0.5) * 220, H / 2 + Math.sin(d.t * 0.7) * 160, 40, 0.6, dt);
+
+    if (d.charge > 0) {
+      e.vx *= 0.9;
+      e.vy *= 0.9;
+      if ((d.charge -= dt) <= 0) {
+        d.charge = 0;
+        // Teleport somewhere at least 350 px from every pilot.
+        let best = null;
+        for (let i = 0; i < 20; i++) {
+          const x = 150 + Math.random() * (W - 300);
+          const y = 150 + Math.random() * (H - 300);
+          const near = Math.min(...g.players.map((pl) => Math.hypot(x - pl.x, y - pl.y)));
+          if (!best || near > best[2]) best = [x, y, near];
+          if (near > 350) break;
+        }
+        g.particles.emit(e.x, e.y, { count: 40, color: '#c48bff', speed: 300, life: 0.5 });
+        e.x = best[0];
+        e.y = best[1];
+        e.vx = 0;
+        e.vy = 0;
+        d.blink = 1;
+        g.addRing(e.x, e.y, { maxR: 160, life: 0.35, color: '#e8d4ff', width: 5 });
+        const n = enraged ? 20 : 14;
+        for (let i = 0; i < n; i++) g.fireEnemyBullet(e.x, e.y, e.angle + (i * TAU) / n, 210);
+        g.audio.dash();
+      }
+    }
+    if (d.fans > 0 && (d.fanT -= dt) <= 0) {
+      d.fans--;
+      d.fanT = 0.35;
+      const p = g.nearestPlayer(e.x, e.y);
+      const a = Math.atan2(p.y - e.y, p.x - e.x);
+      const n = enraged ? 9 : 7;
+      for (let i = 0; i < n; i++) g.fireEnemyBullet(e.x, e.y, a + (i - (n - 1) / 2) * 0.16, 300);
+    }
+    if (d.charge <= 0 && d.fans <= 0 && (d.attackT -= dt) <= 0) {
+      const attack = (enraged ? ['blink', 'fan', 'mirror', 'blink', 'fan'] : ['blink', 'fan', 'blink', 'fan'])[d.cycle++ % (enraged ? 5 : 4)];
+      if (attack === 'blink') d.charge = 0.7;
+      else if (attack === 'fan') d.fans = 3;
+      else {
+        for (let i = 0; i < 2; i++) {
+          const a = e.angle + i * Math.PI;
+          g.spawnEnemy('decoy', e.x + Math.cos(a) * 120, e.y + Math.sin(a) * 120);
+        }
+      }
+      d.attackT = enraged ? 1.5 : 2.1;
+    }
+  },
+  onDeath(e, g) {
+    g.bossDefeated(e);
+  },
+  draw(ctx, e, t, color) {
+    const d = e.data;
+    const enraged = d.phase === 2;
+    const body = color === '#ffffff' ? color : enraged ? '#ff8af0' : color;
+    const k = d.charge > 0 ? 0.55 + (d.charge / 0.7) * 0.45 : 1; // shrinks before a blink
+    const r = e.r * k;
+    if (d.blink > 0) {
+      ctx.globalAlpha = d.blink * 0.6;
+      ctx.strokeStyle = '#ffffff';
+      ctx.beginPath();
+      circle(ctx, e.x, e.y, e.r * (1.2 + (1 - d.blink) * 1.5));
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+    ctx.strokeStyle = body;
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    poly(ctx, e.x, e.y, r, 6, e.angle);
+    poly(ctx, e.x, e.y, r * 0.75, 3, -e.angle * 1.3);
+    poly(ctx, e.x, e.y, r * 0.75, 3, -e.angle * 1.3 + Math.PI);
+    ctx.stroke();
+    if (d.charge > 0) {
+      ctx.globalAlpha = 0.8;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      for (let i = 0; i < 6; i++) {
+        const a = e.angle + (i * TAU) / 6;
+        ctx.moveTo(e.x + Math.cos(a) * e.r * 1.6, e.y + Math.sin(a) * e.r * 1.6);
+        ctx.lineTo(e.x + Math.cos(a) * r, e.y + Math.sin(a) * r);
+      }
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+    ctx.lineWidth = 2.5;
+  },
+};
+
 /** Boss waves cycle through these, every fifth wave. */
-export const BOSS_ORDER = ['boss', 'warden', 'brood'];
+export const BOSS_ORDER = ['boss', 'warden', 'brood', 'serpent', 'prism'];
 export const ENEMY_TYPES = Object.keys(ENEMIES);
 
 export const SPAWN_TIME = 0.75;

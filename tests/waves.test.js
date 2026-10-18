@@ -39,9 +39,9 @@ test('every fifth wave is a boss wave with exactly one boss', () => {
   }
 });
 
-test('bosses rotate: Hydra Core, Laser Warden, Brood Mother, then around again', () => {
-  const order = [5, 10, 15, 20, 25, 30].map((n) => planWave(n, new Rng(n)).groups.find((g) => ENEMIES[g.type].boss).type);
-  assert.deepEqual(order, ['boss', 'warden', 'brood', 'boss', 'warden', 'brood']);
+test('bosses rotate through all five, then around again', () => {
+  const order = [5, 10, 15, 20, 25, 30, 35].map((n) => planWave(n, new Rng(n)).groups.find((g) => ENEMIES[g.type].boss).type);
+  assert.deepEqual(order, ['boss', 'warden', 'brood', 'serpent', 'prism', 'boss', 'warden']);
   for (const t of BOSS_ORDER) assert.ok(ENEMIES[t].title && ENEMIES[t].boss, `${t} needs a title`);
 });
 

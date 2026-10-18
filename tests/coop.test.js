@@ -2,10 +2,10 @@
 // in-memory link that carries the same JSON and binary messages WebRTC would.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { Game, coopHp } from '../src/game/game.js';
+import { Game, coopHp, CHRONOS_SCALE, CHRONOS_COOLDOWN } from '../src/game/game.js';
 import { CoopSession } from '../src/net/coop.js';
-import { ENEMIES } from '../src/game/enemies.js';
-import { shootPlayer } from '../src/game/player.js';
+import { ENEMIES, BOSS_ORDER, serpentSegments } from '../src/game/enemies.js';
+import { shootPlayer, STORM_EVERY, STORM_SHOTS } from '../src/game/player.js';
 
 const noop = () => {};
 const silentAudio = new Proxy({}, { get: () => noop });
@@ -221,22 +221,29 @@ test('Aegis Shield absorbs a hit; Phoenix Core revives once', () => {
   assert.equal(g.state, 'dying');
 });
 
-test('Chronos slows enemy fire to 45%; Bullet Storm rings every 4th volley', () => {
+test('Chronos slows enemy fire (with a cooldown); Bullet Storm rings every few volleys', () => {
   const g = solo();
   const p = g.player;
   p.stats.chronos = 1;
   g.onDash(p);
   g.enemyBullets.push({ x: 1000, y: 100, vx: 100, vy: 0, r: 7, life: 6 });
   g.step(0.1);
-  assert.ok(Math.abs(g.enemyBullets[0].x - 1004.5) < 1e-6);
+  assert.ok(Math.abs(g.enemyBullets[0].x - (1000 + 10 * CHRONOS_SCALE)) < 1e-6);
+  g.slowT = 0;
+  g.onDash(p);
+  assert.equal(g.slowT, 0, 'Chronos is on cooldown');
+  g.time += CHRONOS_COOLDOWN;
+  g.onDash(p);
+  assert.ok(g.slowT > 0, 'and ready again after it');
 
   p.stats.storm = 1;
   const before = g.bullets.length;
-  for (let i = 0; i < 4; i++) {
+  p.volleys = 0;
+  for (let i = 0; i < STORM_EVERY; i++) {
     p.fireCd = 0;
     shootPlayer(g, p, true);
   }
-  assert.equal(g.bullets.length - before, 4 + 16);
+  assert.equal(g.bullets.length - before, STORM_EVERY + STORM_SHOTS);
 });
 
 test('Laser Warden beams hit only while active, along every beam', () => {
@@ -250,23 +257,49 @@ test('Laser Warden beams hit only while active, along every beam', () => {
   assert.ok(!at(1400, 600), 'telegraph is harmless');
 });
 
-for (const type of ['boss', 'warden', 'brood']) {
+test('Void Serpent: only its body hurts on contact, laid out behind the head', () => {
+  const g = solo();
+  g.wave = 20;
+  const s = g.spawnEnemy('serpent', 1000, 600, { telegraph: false });
+  const p = g.player;
+  p.x = 300;
+  p.y = 1100;
+  for (let i = 0; i < 120 * 3; i++) {
+    p.invuln = 10;
+    g.step(1 / 120);
+  }
+  const segs = serpentSegments(s);
+  assert.equal(segs.length, 14);
+  for (let i = 1; i < segs.length; i++) assert.ok(Math.abs(Math.hypot(segs[i][0] - segs[i - 1][0], segs[i][1] - segs[i - 1][1]) - 30) < 1);
+  assert.ok(ENEMIES.serpent.hits(s, { x: segs[6][0], y: segs[6][1], r: 12 }));
+  assert.ok(!ENEMIES.serpent.hits(s, { x: s.x + 400, y: s.y + 400, r: 12 }));
+});
+
+for (const type of BOSS_ORDER) {
   test(`${ENEMIES[type].title}: survives 25 s of its own pattern, then dies cleanly`, () => {
     const g = solo();
     g.wave = 10;
     const p = g.player;
     const boss = g.spawnEnemy(type, 1000, 400, { telegraph: false });
     const modes = new Set();
+    let maxJump = 0;
+    let last = [boss.x, boss.y];
     for (let i = 0; i < 25 * 120; i++) {
       p.invuln = 10; // watch the pattern, don't die
       g.step(1 / 120);
       modes.add(`${boss.data.mode ?? ''}${boss.data.beamMode ?? ''}`);
+      maxJump = Math.max(maxJump, Math.hypot(boss.x - last[0], boss.y - last[1]));
+      last = [boss.x, boss.y];
       if (i === 12 * 120) g.damageEnemy(boss, boss.maxHp * 0.6, 0, 0, false); // trigger phase 2
     }
     assert.equal(boss.data.phase, 2, 'enraged at half health');
     assert.ok(g.enemyBullets.length + g.enemies.length > 1, 'it attacks');
     if (type === 'warden') assert.ok(modes.has('2'), 'beams fired');
     if (type === 'brood') assert.ok(modes.has('1') && modes.has('2'), 'it winds up and charges');
+    if (type === 'prism') {
+      assert.ok(maxJump > 150, 'it teleports');
+      assert.ok(g.enemies.some((o) => o.type === 'decoy' && !o.dead), 'enraged: mirror copies');
+    }
     g.damageEnemy(boss, 1e9, 0, 0, false);
     assert.ok(boss.dead);
     g.step(1 / 120);

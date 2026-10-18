@@ -92,9 +92,9 @@ test('epics and legendaries stay rare across simulated runs', () => {
   }
   const epicRate = withEpic / offers;
   const legendRate = withLegend / offers;
-  assert.ok(epicRate > 0.07 && epicRate < 0.14, `epic in ${(epicRate * 100).toFixed(1)}% of offers`);
-  assert.ok(legendRate > 0.004 && legendRate < 0.02, `legendary in ${(legendRate * 100).toFixed(1)}% of offers`);
-  assert.ok(runsWithLegend / 3000 < 0.25, `${((runsWithLegend / 3000) * 100).toFixed(1)}% of runs see a legendary`);
+  assert.ok(epicRate > 0.05 && epicRate < 0.11, `epic in ${(epicRate * 100).toFixed(1)}% of offers`);
+  assert.ok(legendRate > 0.002 && legendRate < 0.014, `legendary in ${(legendRate * 100).toFixed(1)}% of offers`);
+  assert.ok(runsWithLegend / 3000 < 0.18, `${((runsWithLegend / 3000) * 100).toFixed(1)}% of runs see a legendary`);
 });
 
 test('new augments change the right stats', () => {

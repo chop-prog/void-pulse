@@ -19,11 +19,13 @@ Most browser games lean on Phaser, Pixi or Three.js. VOID PULSE uses **none** of
 
 - **Online co-op for two.** Create a room, send a friend the link, and fly together. Browsers connect directly over WebRTC. With two pilots, enemies get 60% more health (75% for bosses) and waves are 50% bigger. A downed pilot spectates and rejoins at the start of the next wave; the run ends only when both are down.
 - **7 enemy archetypes with distinct AI.** Seekers home in. Dodgers read incoming bullets and sidestep them. Splitters burst into fragments. Snipers hold range and fire telegraphed shots. Singularities bend bullets, drag ships and eat other enemies until they overload. In co-op every enemy targets the nearest pilot.
-- **Three bosses in rotation**, every 5th wave, each with an enraged second phase:
+- **Five bosses in rotation**, every 5th wave, each with an enraged second phase:
   - *Hydra Core*: radial bursts, spirals, aimed volleys and summons;
   - *Laser Warden*: telegraphed laser beams that sweep the arena (two, then four), bullet flowers and dodger escorts;
-  - *Brood Mother*: pours out swarms of minis, winds up, and rams the nearest pilot, bursting into a bullet ring on impact.
-- **Roguelite build-crafting.** 21 augments across 4 rarities, offered as a pick of 3 between waves. Epics show up in about 1 offer in 10 and never more than one per offer; legendaries are rarer still and enter the pool from wave 6: *Bullet Storm* (every 4th volley is a 16-shot ring), *Phoenix Core* (survive one fatal hit in a blast) and *Chronos* (dashing slows every enemy). New epics include rear guns, a periodic *Nova Pulse* shockwave and a recharging *Aegis Shield*. In co-op each pilot picks their own.
+  - *Brood Mother*: pours out swarms of minis, winds up, and rams the nearest pilot, bursting into a bullet ring on impact;
+  - *Void Serpent*: a 14-segment serpent that hunts the nearest pilot. Only its head takes damage; the body is a moving wall that fires rib volleys sideways. In co-op each side lays the body out along the path its head took, so no segment positions travel over the network;
+  - *Prism*: blinks around the arena, shrinking before every jump as a tell, bursts on arrival, fires aimed fans, and when enraged splits off mirror copies that keep shooting.
+- **Roguelite build-crafting.** 21 augments across 4 rarities, offered as a pick of 3 between waves. Epics show up in about 1 offer in 12 and never more than one per offer. Legendaries are rarer still (about 1 run in 9 sees one) and enter the pool from wave 6: *Bullet Storm* (every 6th volley is a 12-shot ring), *Phoenix Core* (survive one fatal hit with a small blast) and *Chronos* (a dash slows enemies for 1.8 s, once every 6 s). New epics include rear guns, a periodic *Nova Pulse* shockwave and a recharging *Aegis Shield*. In co-op each pilot picks their own.
 - **Daily run.** A seed derived from the UTC date gives every player on Earth the same waves and the same upgrade offers.
 - **Game feel.** Hit-stop, trauma-based screen shake, a warping background grid, bloom, a score multiplier fed by shards, and a "mercy blast" so a single hit never chains into an instant second death.
 - **Every input device.** Keyboard + mouse, gamepad (standard mapping, including menu navigation) and dual floating virtual sticks on touch screens.
@@ -118,7 +120,7 @@ Otherwise, note that ES modules must be served over HTTP (opening `index.html` f
 
 ```bash
 npm start          # zero-dependency dev server → http://localhost:5173
-npm test           # 57 tests on Node's built-in test runner
+npm test           # 60 tests on Node's built-in test runner
 ```
 
 Any static server works too, for example `python -m http.server`.
@@ -133,7 +135,7 @@ Any static server works too, for example `python -m http.server`.
 - wave plans: budget, unlock order, boss cadence, and determinism per seed;
 - spawn formations: always inside the arena and at a safe distance from every pilot;
 - upgrade rolls: no duplicates, no maxed upgrades, rarity distribution, at most one epic or legendary per offer, legendaries held back until wave 6, and the measured odds over simulated runs;
-- bosses: each of the three survives 25 s of its own pattern, enrages at half health and dies cleanly; laser hitboxes;
+- bosses: each of the five survives 25 s of its own pattern, enrages at half health and dies cleanly; laser hitboxes;
 - the co-op wire format (snapshot and input round-trips, size budget), MQTT packet framing across split chunks, room codes and encrypted signalling;
 - a full co-op session between two in-memory games;
 - the relay link over an in-memory broker: message order through async encryption, compressed snapshots, back-pressure, wrong-key messages, goodbye;

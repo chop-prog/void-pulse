@@ -12,6 +12,7 @@ import { createPlayer, movePlayer, trailPlayer, clampToArena } from '../game/pla
 import { singularityPull } from '../game/enemies.js';
 import { UPGRADE_BY_ID } from '../game/upgrades.js';
 import { clamp, damp } from '../engine/math.js';
+import { CHRONOS_SCALE } from '../game/game.js';
 
 // Over the relay (public MQTT broker) we send less, to stay well inside its rate limits.
 const RATES = { direct: { snapshot: 30, input: 60 }, relay: { snapshot: 12, input: 20 } };
@@ -298,7 +299,14 @@ export class CoopSession {
         e = { ...se, dead: false, hp: 1, maxHp: 1 };
         byId.set(se.id, e);
       } else {
-        Object.assign(e, { vx: se.vx, vy: se.vy, angle: se.angle, r: se.r, spawnT: se.spawnT, flash: se.flash, data: se.data });
+        // Merge, don't replace: some bosses keep local-only drawing state in data (the serpent's trail).
+        Object.assign(e, { vx: se.vx, vy: se.vy, angle: se.angle, r: se.r, spawnT: se.spawnT, flash: se.flash });
+        Object.assign(e.data, se.data);
+        // A teleport (the Prism) should jump, not glide across the arena.
+        if (Math.hypot(se.x - e.x, se.y - e.y) > 220) {
+          e.x = se.x;
+          e.y = se.y;
+        }
       }
       e.sx = se.x;
       e.sy = se.y;
@@ -348,7 +356,7 @@ export class CoopSession {
       return;
     }
     if (g.state !== 'playing') g.menuNav();
-    const slow = g.slowT > 0 ? 0.45 : 1;
+    const slow = g.slowT > 0 ? CHRONOS_SCALE : 1;
     g.time += dt;
 
     // Our own ship: simulated here, reported to the host.
