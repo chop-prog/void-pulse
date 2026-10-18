@@ -216,17 +216,28 @@ test('on a jittery network enemies still move smoothly on the guest\'s screen', 
   run(4);
   const tracked = guest.enemies.find((e) => e.spawnT <= 0);
   assert.ok(tracked, 'an enemy is on screen');
+  const session = guest.net;
   const steps = [];
+  const pace = []; // how far the guest's view of time moved per tick, in ticks
   let last = [tracked.x, tracked.y];
-  run(2, () => {
+  let lastRt = session.renderTime;
+  let tick = 0;
+  run(3, () => {
+    // Kills and hits cause hit-stop on the host every so often; the guest must not freeze over it.
+    if (++tick % 70 === 0) host.hitstop = 0.15;
+    pace.push((session.renderTime - lastRt) * 120);
+    lastRt = session.renderTime;
     if (!guest.enemies.includes(tracked)) return;
     steps.push(Math.hypot(tracked.x - last[0], tracked.y - last[1]));
     last = [tracked.x, tracked.y];
   });
-  steps.sort((x, y) => x - y);
-  const max = steps[steps.length - 1];
-  // Wave-1 enemies move ≤ ~400 px/s → ≤ ~3.5 px per 1/120 s tick. Jumps would show as tens of px.
+  // The guest's timeline never stalls (frozen picture) and never leaps (skipped motion)…
+  const slowest = Math.min(...pace);
+  const fastest = Math.max(...pace);
+  assert.ok(slowest > 0.8 && fastest < 1.2, `timeline pace ${slowest.toFixed(2)}–${fastest.toFixed(2)}× real time`);
+  // …so enemies glide: wave-1 enemies move ≤ ~400 px/s, ≤ ~3.5 px per 1/120 s tick.
   assert.ok(steps.length > 60, 'tracked long enough');
+  const max = Math.max(...steps);
   assert.ok(max < 8, `largest per-frame jump ${max.toFixed(1)} px`);
 });
 

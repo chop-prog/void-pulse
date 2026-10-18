@@ -179,7 +179,7 @@ export class CoopSession {
     if ((this.sendT += dt) < 1 / this.rates.snapshot) return;
     this.sendT = 0;
     if (g.outbox.list.length) {
-      const msg = JSON.stringify({ t: 'fx', time: g.time, list: g.outbox.list });
+      const msg = JSON.stringify({ t: 'fx', time: g.clock, list: g.outbox.list });
       g.outbox.list = [];
       if (this.link.ctl.readyState === 'open') {
         this.link.ctl.send(msg);
@@ -280,6 +280,7 @@ export class CoopSession {
     this.buffer = [];
     this.fxQueue = [];
     this.offset = null;
+    this.rtStarted = false;
     this.respawnTick = m.tick;
     g.camera.x = me.x;
     g.camera.y = me.y;
@@ -504,10 +505,15 @@ export class CoopSession {
 
     // The world, a little in the past.
     if (this.offset !== null) {
-      const rt = this.now() + this.offset - this.targetDelay();
-      // Never run backwards (the clock estimate wobbles a little).
-      this.renderTime = Math.max(this.renderTime, rt);
-      if (this.renderTime - rt > RESYNC) this.renderTime = rt;
+      const target = this.now() + this.offset - this.targetDelay();
+      // Play the buffered timeline at real speed and absorb clock-estimate wobble by running up to
+      // 15% faster or slower: never freezes, never runs backwards. Big errors (pause, hitch) snap.
+      if (!this.rtStarted || Math.abs(target - this.renderTime) > RESYNC) {
+        this.renderTime = target;
+        this.rtStarted = true;
+      } else {
+        this.renderTime += dt * (1 + clamp((target - this.renderTime) * 2, -0.15, 0.15));
+      }
       this.interpolate(this.renderTime);
       this.flushFx(this.renderTime);
       // Effects stamped far behind (after a pause or hitch) play now rather than never.

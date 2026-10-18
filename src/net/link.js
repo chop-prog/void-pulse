@@ -18,7 +18,7 @@ const ICE_SERVERS = [
   { urls: 'stun:stun.cloudflare.com:3478' },
 ];
 /** Bumped whenever the two sides could misunderstand each other; both must match to connect. */
-export const PROTOCOL = 4;
+export const PROTOCOL = 5;
 export const OLD_VERSION_HINT = 'Reload the page (on a phone: close the tab and open the link again).';
 const ANSWER_TIMEOUT = 15000;
 const DIRECT_TIMEOUT = 6000;

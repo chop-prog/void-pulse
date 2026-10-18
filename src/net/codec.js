@@ -47,7 +47,7 @@ export function encodeSnapshot(g) {
   w8(VERSION);
   w8(KIND_SNAPSHOT);
   w32(g.tick);
-  wf(g.time);
+  wf(g.clock ?? g.time); // the host's steady clock: the guest's interpolation timeline
   w8(Math.max(0, STATES.indexOf(g.state)));
   wu16(g.wave);
   v.setFloat64(o, g.score, true);

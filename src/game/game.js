@@ -54,6 +54,8 @@ export class Game {
     this.view = { zoom: 1, ox: 0, oy: 0, dpr: 1 };
     this.trauma = 0;
     this.time = 0;
+    // Steady clock for co-op timing: unlike `time` it is never slowed by hit-stop or paused.
+    this.clock = 0;
     this.tick = 0;
     this.ambientT = 0;
     this.debug = typeof location !== 'undefined' && new URLSearchParams(location.search).has('debug');
@@ -201,6 +203,7 @@ export class Game {
   // ── Update ───────────────────────────────────────────────────────────────────
   update(dt) {
     this.tick++;
+    this.clock += dt;
     const input = this.input;
     input.poll();
     if (input.consume('debug')) {
