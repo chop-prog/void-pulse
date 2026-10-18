@@ -44,13 +44,23 @@ function memoryStorage() {
 
 const makeGame = () => new Game({ renderer: null, input: stubInput(), audio: silentAudio, ui: stubUI(), settings: { shake: false }, storage: memoryStorage() });
 
-/** Two connected fake links. Messages are serialised like the real thing and delivered at once. */
-function linkPair() {
+/**
+ * Two connected fake links over a simulated network. Messages are serialised like the real
+ * thing. With `lag(kind)` returning seconds, delivery is delayed: snapshots/inputs ('state')
+ * independently (they may reorder), control messages in order, like a reliable channel.
+ */
+function linkPair(clock, lag = () => 0) {
+  const queue = [];
+  let lastCtl = 0;
   const make = () => {
     const link = {
       rtt: 5, closed: false, closeHooks: [], onCtl: null, onState: null, onClose: null,
-      sendCtl(m) { const s = JSON.stringify(m); if (!link.closed) link.peer.onCtl?.(JSON.parse(s)); },
-      sendState(buf) { if (!link.closed) link.peer.onState?.(buf.slice(0)); return true; },
+      sendCtl(m) { link.ctl.send(JSON.stringify(m)); },
+      sendState(buf) {
+        const copy = buf.slice(0);
+        queue.push({ at: clock.t + lag('state'), go: () => !link.closed && link.peer.onState?.(copy) });
+        return true;
+      },
       close() {
         if (link.closed) return;
         link.closed = true;
@@ -58,32 +68,47 @@ function linkPair() {
         link.peer.close();
       },
     };
-    link.ctl = { readyState: 'open', send: (s) => !link.closed && link.peer.onCtl?.(JSON.parse(s)) };
+    link.ctl = {
+      readyState: 'open',
+      send: (text) => {
+        lastCtl = Math.max(lastCtl, clock.t + lag('ctl'));
+        queue.push({ at: lastCtl, go: () => !link.closed && link.peer.onCtl?.(JSON.parse(text)) });
+      },
+    };
     return link;
   };
   const a = make();
   const b = make();
   a.peer = b;
   b.peer = a;
-  return [a, b];
+  const deliver = () => {
+    queue.sort((x, y) => x.at - y.at);
+    while (queue.length && queue[0].at <= clock.t) queue.shift().go();
+  };
+  return [a, b, deliver];
 }
 
-function coop() {
+function coop({ lag } = {}) {
   const host = makeGame();
   const guest = makeGame();
-  const [a, b] = linkPair();
-  new CoopSession(host, a, 'host');
-  new CoopSession(guest, b, 'guest');
+  const clock = { t: 0 };
+  const now = () => clock.t;
+  const [a, b, deliver] = linkPair(clock, lag);
+  new CoopSession(host, a, 'host', { now });
+  new CoopSession(guest, b, 'guest', { now });
   host.newRun();
-  const run = (seconds) => {
+  deliver();
+  const run = (seconds, each) => {
     for (let i = 0; i < Math.round(seconds * 120); i++) {
+      clock.t += 1 / 120;
       host.update(1 / 120);
+      deliver();
       guest.update(1 / 120);
+      each?.();
     }
   };
-  return { host, guest, a, b, run };
+  return { host, guest, a, b, run, clock };
 }
-
 test('starting a co-op run puts both pilots in the same world', () => {
   const { host, guest } = coop();
   assert.equal(host.mode, 'coop');
@@ -157,6 +182,7 @@ test('a downed pilot returns next wave; upgrades wait for both; game over needs 
   assert.equal(host.state, 'upgrade', 'host waits for the guest');
   assert.ok(host.ui.waiting);
   guest.ui.onPick(1);
+  run(1 / 30); // the pick travels to the host
   assert.equal(host.state, 'playing');
   assert.equal(host.wave, 2);
   assert.ok(p2.alive && p2.lives === 1, 'P2 respawned with one life');
@@ -179,6 +205,47 @@ test('a downed pilot returns next wave; upgrades wait for both; game over needs 
   assert.equal(guest.state, 'gameover');
   assert.equal(guest.ui.over.mode, 'coop');
   assert.equal(guest.ui.over.score, host.ui.over.score);
+});
+
+test('on a jittery network enemies still move smoothly on the guest\'s screen', () => {
+  // 40–190 ms latency per snapshot, independently: packets bunch up, leave gaps and reorder.
+  let seed = 7;
+  const rand = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+  const { host, guest, run } = coop({ lag: (kind) => (kind === 'state' ? 0.04 + rand() * 0.15 : 0.06) });
+  for (const p of host.players) p.invuln = 1000;
+  run(4);
+  const tracked = guest.enemies.find((e) => e.spawnT <= 0);
+  assert.ok(tracked, 'an enemy is on screen');
+  const steps = [];
+  let last = [tracked.x, tracked.y];
+  run(2, () => {
+    if (!guest.enemies.includes(tracked)) return;
+    steps.push(Math.hypot(tracked.x - last[0], tracked.y - last[1]));
+    last = [tracked.x, tracked.y];
+  });
+  steps.sort((x, y) => x - y);
+  const max = steps[steps.length - 1];
+  // Wave-1 enemies move ≤ ~400 px/s → ≤ ~3.5 px per 1/120 s tick. Jumps would show as tens of px.
+  assert.ok(steps.length > 60, 'tracked long enough');
+  assert.ok(max < 8, `largest per-frame jump ${max.toFixed(1)} px`);
+});
+
+test('hits on the guest are judged on the guest\'s screen and confirmed by the host', () => {
+  const { host, guest, run } = coop({ lag: () => 0.05 });
+  for (const e of host.enemies) e.dead = true;
+  host.director.groups = [];
+  run(0.5);
+  const p2 = host.players[1];
+  p2.invuln = 0;
+  run(0.2); // let snapshots without the spawn grace reach the guest
+  guest.player.invuln = 0;
+  const me = guest.player;
+  // A slow enemy bullet parked on the guest's ship, in the host's world.
+  host.enemyBullets.push({ x: me.x, y: me.y, vx: 0, vy: 0, r: 7, life: 6 });
+  const lives = p2.lives;
+  run(0.6);
+  assert.equal(p2.lives, lives - 1, 'host applied the hit the guest reported');
+  assert.ok(guest.player.invuln > 0, 'guest is invulnerable right after');
 });
 
 test('if the guest disconnects, the host carries on alone', () => {

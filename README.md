@@ -56,7 +56,9 @@ sequenceDiagram
 - **No game server.** GitHub Pages only serves static files, so the two browsers find each other through public MQTT brokers ([`mqtt.js`](src/net/mqtt.js) is a ~150-line MQTT 3.1.1 client), swap one WebRTC offer and answer, then talk directly. Signalling goes to three brokers at once, so one being down doesn't matter. Messages are encrypted with a key derived from the room code, and the topic is a hash of the code, so the brokers see only ciphertext ([`signal.js`](src/net/signal.js)).
 - **Relay fallback.** Some networks (symmetric NAT and CGNAT, common on mobile carriers) make a direct connection impossible. If no direct path opens within 6 s, both sides switch to a relay through a broker they share ([`relay.js`](src/net/relay.js)). It uses the same interface as the WebRTC link, so the game code doesn't change. Traffic is still encrypted with the room key, snapshots are deflate-compressed and sent at 12 Hz instead of 30, and a snapshot is skipped rather than queued when the broker connection backs up. The lobby says which path you got, and so does the HUD.
 - **Host-authoritative simulation.** The host runs the real game (enemies, bullets, damage, scoring, upgrades) and streams a quantised binary snapshot ([`codec.js`](src/net/codec.js)). Positions and velocities are int16 and angles are int16 × 10⁻⁴. Of each enemy's behaviour state, only the fields its type declares in `sync` are sent, because those are all `draw()` needs. A late-game frame with 150 enemies and 1,000 bullets is under 20 KB; a typical one is a few KB.
-- **No input lag for the guest.** The guest flies its own ship locally and reports position, aim and trigger; the host fires the guest's guns from that report. Everything else is extrapolated along its velocity between snapshots and eased toward the newest one ([`coop.js`](src/net/coop.js)).
+- **No input lag for the guest.** The guest flies its own ship locally and reports position, aim and trigger; the host fires the guest's guns from that report and smooths the ship between reports ([`coop.js`](src/net/coop.js)).
+- **Smooth over a bad network.** Packets over the internet arrive unevenly: in bursts, with gaps, out of order. So the guest draws the world a little in the past, interpolated between the two buffered snapshots that bracket that moment, as action games do. The delay adapts to measured jitter, about 70 ms on a good direct link and more over the relay. Effects carry the host's clock and play at the same buffered moment, so an explosion lines up with its enemy. A test drives a simulated network with 40–190 ms random latency per packet and checks that no enemy jumps on the guest's screen.
+- **Fair hits.** The guest judges hits on its own ship against what it sees (the host confirms them), so a bullet that visibly missed never counts.
 - **Same effects on both screens.** On the host, particle, grid, audio and banner calls go through a recording proxy ([`fx-record.js`](src/game/fx-record.js)), and the guest replays the batch on its own systems. Purely local effects (engine trails, grid wakes) bypass it and are recomputed on each side.
 - **Tested without a network.** [`tests/coop.test.js`](tests/coop.test.js) runs a real host `Game` and a real guest `Game` joined by an in-memory link carrying the same messages. It checks that the worlds stay in sync and that the guest's ship and guns work. It also covers the downed-pilot, shared-upgrade, game-over and disconnect flows.
 
@@ -120,7 +122,7 @@ Otherwise, note that ES modules must be served over HTTP (opening `index.html` f
 
 ```bash
 npm start          # zero-dependency dev server → http://localhost:5173
-npm test           # 60 tests on Node's built-in test runner
+npm test           # 62 tests on Node's built-in test runner
 ```
 
 Any static server works too, for example `python -m http.server`.

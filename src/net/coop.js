@@ -1,34 +1,51 @@
 // Online co-op session: glue between a Game and a Link.
 //
-// The host runs the real simulation (enemies, bullets, scoring, upgrades) and streams it to
-// the guest: a binary world snapshot at 30 Hz plus a batch of recorded effects (explosions,
-// sounds, rings, banners). The guest flies its own ship locally, with no input lag, and reports its
-// position, aim and trigger at 60 Hz; the host spawns the guest's bullets from that report.
-// Between snapshots the guest extrapolates everything along its velocity and eases
-// toward the newest data, so 30 Hz updates still look smooth at 120 fps.
+// The host runs the real simulation (enemies, bullets, scoring, upgrades) and streams it to the
+// guest: a binary world snapshot (30 Hz direct, 12 Hz over the relay) plus batches of recorded
+// effects (explosions, sounds, rings, banners), all stamped with the host's simulation clock.
+//
+// The guest flies its own ship locally (no input lag) and reports its position, aim and trigger;
+// the host fires the guest's guns from those reports and smooths the ship between them.
+//
+// Everything else on the guest is shown slightly in the past, interpolated between two buffered
+// snapshots — the standard netcode answer to jitter. Packets over the internet arrive unevenly
+// (in bursts, with gaps); drawing the newest one as it lands makes enemies stutter, drawing a
+// buffered moment that both neighbouring snapshots bracket keeps motion smooth. The buffer delay
+// adapts to the measured jitter. Effects are replayed at the same buffered moment, so an
+// explosion lines up with the enemy that caused it. The guest also judges hits on its own ship
+// against what it sees, so a bullet that visibly missed never counts.
 
 import { encodeSnapshot, decodeSnapshot, encodeInput, decodeInput, messageKind, KIND_SNAPSHOT, KIND_INPUT } from './codec.js';
 import { createPlayer, movePlayer, trailPlayer, clampToArena } from '../game/player.js';
 import { singularityPull } from '../game/enemies.js';
 import { UPGRADE_BY_ID } from '../game/upgrades.js';
-import { clamp, damp } from '../engine/math.js';
+import { clamp, damp, lerp, angleDiff } from '../engine/math.js';
 import { CHRONOS_SCALE } from '../game/game.js';
 
 // Over the relay (public MQTT broker) we send less, to stay well inside its rate limits.
 const RATES = { direct: { snapshot: 30, input: 60 }, relay: { snapshot: 12, input: 20 } };
 const RUN_STATES = new Set(['playing', 'paused', 'upgrade', 'dying']);
+const BUFFER_SECONDS = 2;
+const MAX_EXTRAPOLATION = 0.15; // s past the newest snapshot before we just hold still
+const RESYNC = 0.5; // s of clock error that makes us snap the clock instead of easing it
+const HIT_INVULN = 2.2;
 
-/** Host-side stand-in for the guest's controller, fed by the guest's 60 Hz reports. */
+const wallClock = () => performance.now() / 1000;
+
+/** Host-side stand-in for the guest's controller, fed by the guest's reports. */
 export class RemoteInput {
-  constructor() {
+  constructor(now = wallClock) {
+    this.now = now;
     this.actions = new Set();
     this.reset();
   }
 
   reset() {
     this.state = null;
+    this.recvAt = 0;
     this.lastSeq = -1;
     this.lastDashSeq = null;
+    this.placed = false;
     this.actions.clear();
   }
 
@@ -36,6 +53,7 @@ export class RemoteInput {
     if (report.seq <= this.lastSeq) return; // unordered channel: drop stale reports
     this.lastSeq = report.seq;
     this.state = report;
+    this.recvAt = this.now();
   }
 
   push(action) {
@@ -46,8 +64,12 @@ export class RemoteInput {
     return this.actions.delete(action);
   }
 
-  /** Move the guest's ship to where the guest says it is. Returns whether it is firing. */
-  applyTo(p, g) {
+  /**
+   * Move the guest's ship toward where the guest says it is, extrapolated by its velocity since
+   * the report arrived (velocity feed-forward + gentle correction: smooth at 20–60 Hz reports).
+   * Returns whether the guest is firing.
+   */
+  applyTo(p, g, dt) {
     const s = this.state;
     // Reports sent while the guest still thought it was dead (respawn in flight) are ignored.
     if (!s || !s.alive) return false;
@@ -57,17 +79,28 @@ export class RemoteInput {
       g.onDash(p, true);
     }
     this.lastDashSeq = s.dashSeq;
-    Object.assign(p, { x: s.x, y: s.y, vx: s.vx, vy: s.vy, aim: s.aim, dashT: s.dashT });
+    const age = Math.min(0.2, Math.max(0, this.now() - this.recvAt));
+    const tx = s.x + s.vx * age;
+    const ty = s.y + s.vy * age;
+    if (!this.placed || Math.hypot(tx - p.x, ty - p.y) > 200) {
+      p.x = tx;
+      p.y = ty;
+      this.placed = true;
+    } else {
+      p.x = damp(p.x + s.vx * dt, tx, 12, dt);
+      p.y = damp(p.y + s.vy * dt, ty, 12, dt);
+    }
+    Object.assign(p, { vx: s.vx, vy: s.vy, aim: s.aim, dashT: s.dashT });
     clampToArena(g, p);
     return s.fire;
   }
 }
 
 export class CoopSession {
-  constructor(game, link, role, { onEnd } = {}) {
-    Object.assign(this, { g: game, link, role, onEnd });
+  constructor(game, link, role, { onEnd, now = wallClock } = {}) {
+    Object.assign(this, { g: game, link, role, onEnd, now });
     this.rates = RATES[link.kind] ?? RATES.direct;
-    this.remoteInput = new RemoteInput();
+    this.remoteInput = new RemoteInput(now);
     this.sendT = 0;
     this.inputT = 0;
     this.seq = 0;
@@ -76,6 +109,11 @@ export class CoopSession {
     this.snap = null;
     this.offer = null;
     this.enemyById = new Map();
+    this.buffer = []; // decoded snapshots, oldest first
+    this.fxQueue = []; // [hostTime, events] waiting for the buffered moment
+    this.offset = null; // host clock − local clock, smoothed
+    this.jitter = 0;
+    this.renderTime = 0;
     this.respawnTick = 0; // snapshots older than this can't tell us whether we're alive
     this.bytes = 0;
     this.bytesPerSec = 0;
@@ -141,7 +179,7 @@ export class CoopSession {
     if ((this.sendT += dt) < 1 / this.rates.snapshot) return;
     this.sendT = 0;
     if (g.outbox.list.length) {
-      const msg = JSON.stringify({ t: 'fx', list: g.outbox.list });
+      const msg = JSON.stringify({ t: 'fx', time: g.time, list: g.outbox.list });
       g.outbox.list = [];
       if (this.link.ctl.readyState === 'open') {
         this.link.ctl.send(msg);
@@ -163,6 +201,10 @@ export class CoopSession {
       case 'restart': if (g.state === 'paused' || g.state === 'gameover') g.newRun(); break;
       case 'bomb': this.remoteInput.push('bomb'); break;
       case 'pick': if (remote) g.pickUpgrade(remote.slot, m.i); break;
+      // The guest judged a hit against what it saw; the host applies it if the ship is hittable.
+      case 'hit':
+        if (remote && remote.alive && remote.invuln <= 0 && remote.dashT <= 0 && g.state === 'playing') g.hitPlayer(remote);
+        break;
       default:
     }
   }
@@ -181,6 +223,7 @@ export class CoopSession {
 
   sendRespawn(p) {
     this.remoteInput.state = null;
+    this.remoteInput.placed = false;
     this.link.sendCtl({ t: 'respawn', tick: this.g.tick, x: p.x, y: p.y });
   }
 
@@ -188,13 +231,17 @@ export class CoopSession {
     this.link.sendCtl({ t: 'over', summary });
   }
 
-  // ── Guest ────────────────────────────────────────────────────────────────────
+  // ── Guest: control messages ──────────────────────────────────────────────────
   guestCtl(m) {
     const g = this.g;
     const me = g.player;
     switch (m.t) {
       case 'start': this.startRun(m); break;
-      case 'fx': for (const ev of m.list) this.applyFx(ev); break;
+      case 'fx':
+        // Older hosts send no time: play at once. Otherwise wait for the buffered moment.
+        if (m.time === undefined) for (const ev of m.list) this.applyFx(ev);
+        else this.fxQueue.push([m.time, m.list]);
+        break;
       case 'upgrade':
         this.offer = m;
         this.showOffer();
@@ -209,6 +256,7 @@ export class CoopSession {
         break;
       case 'over':
         this.offer = null;
+        this.flushFx();
         g.showSummary(m.summary);
         break;
       default:
@@ -229,6 +277,9 @@ export class CoopSession {
     this.snap = null;
     this.offer = null;
     this.enemyById.clear();
+    this.buffer = [];
+    this.fxQueue = [];
+    this.offset = null;
     this.respawnTick = m.tick;
     g.camera.x = me.x;
     g.camera.y = me.y;
@@ -264,67 +315,6 @@ export class CoopSession {
     g.setState(s);
   }
 
-  guestState(buf) {
-    if (messageKind(buf) !== KIND_SNAPSHOT) return;
-    const s = decodeSnapshot(buf);
-    if (this.snap && s.tick <= this.snap.tick) return; // unordered channel: drop stale snapshots
-    this.snap = s;
-    this.bytes += buf.byteLength;
-    const g = this.g;
-    if (!RUN_STATES.has(g.state) && g.state !== 'gameover') return; // still in the lobby
-    Object.assign(g, { wave: s.wave, score: s.score, mult: s.mult, kills: s.kills, slowT: s.slowT, orbAngle: s.orbAngle });
-    this.syncState(s.state);
-
-    for (const sp of s.players) {
-      let p = g.players[sp.slot];
-      if (!p) p = g.players[sp.slot] = createPlayer(sp.x, sp.y, sp.slot);
-      Object.assign(p, { lives: sp.lives, bombs: sp.bombs, invuln: sp.invuln, shield: sp.shield });
-      p.stats.orbitals = sp.orbitals;
-      if (p === g.player) {
-        if (s.tick >= this.respawnTick) p.alive = sp.alive;
-      } else {
-        if (!p.alive && sp.alive) {
-          p.x = sp.x;
-          p.y = sp.y;
-        }
-        Object.assign(p, { tx: sp.x, ty: sp.y, vx: sp.vx, vy: sp.vy, aim: sp.aim, alive: sp.alive, dashT: sp.dashing ? 0.05 : 0 });
-      }
-    }
-
-    const byId = this.enemyById;
-    const seen = new Set();
-    for (const se of s.enemies) {
-      let e = byId.get(se.id);
-      if (!e || e.type !== se.type) {
-        e = { ...se, dead: false, hp: 1, maxHp: 1 };
-        byId.set(se.id, e);
-      } else {
-        // Merge, don't replace: some bosses keep local-only drawing state in data (the serpent's trail).
-        Object.assign(e, { vx: se.vx, vy: se.vy, angle: se.angle, r: se.r, spawnT: se.spawnT, flash: se.flash });
-        Object.assign(e.data, se.data);
-        // A teleport (the Prism) should jump, not glide across the arena.
-        if (Math.hypot(se.x - e.x, se.y - e.y) > 220) {
-          e.x = se.x;
-          e.y = se.y;
-        }
-      }
-      e.sx = se.x;
-      e.sy = se.y;
-      seen.add(se.id);
-    }
-    for (const id of byId.keys()) if (!seen.has(id)) byId.delete(id);
-    g.enemies = [...byId.values()];
-    g.singularities = g.enemies.filter((e) => e.type === 'singularity');
-    g.boss = s.bossId ? byId.get(s.bossId) ?? null : null;
-    if (g.boss) {
-      g.boss.hp = s.bossHp;
-      g.boss.maxHp = 1;
-    }
-    g.bullets = s.bullets;
-    g.enemyBullets = s.enemyBullets;
-    g.geoms = s.geoms;
-  }
-
   applyFx([tag, a, ...rest]) {
     const g = this.g;
     switch (tag) {
@@ -341,6 +331,159 @@ export class CoopSession {
     }
   }
 
+  flushFx(upTo = Infinity) {
+    while (this.fxQueue.length && this.fxQueue[0][0] <= upTo) {
+      for (const ev of this.fxQueue.shift()[1]) this.applyFx(ev);
+    }
+  }
+
+  // ── Guest: snapshots ─────────────────────────────────────────────────────────
+  guestState(buf) {
+    if (messageKind(buf) !== KIND_SNAPSHOT) return;
+    const s = decodeSnapshot(buf);
+    if (this.snap && s.tick <= this.snap.tick) return; // unordered channel: drop stale snapshots
+    this.snap = s;
+    this.bytes += buf.byteLength;
+    const g = this.g;
+    if (!RUN_STATES.has(g.state) && g.state !== 'gameover') return; // still in the lobby
+
+    // Clock: estimate host time − local time, and how much it wobbles (jitter).
+    const sample = s.time - this.now();
+    if (this.offset === null || Math.abs(sample - this.offset) > RESYNC) {
+      this.offset = sample;
+      this.jitter = 0;
+    } else {
+      const err = sample - this.offset;
+      this.jitter += (Math.abs(err) - this.jitter) * 0.1;
+      this.offset += err * 0.05;
+    }
+
+    // Keep the snapshot for interpolation, with base positions for linear movers.
+    s.byId = new Map(s.enemies.map((e) => [e.id, e]));
+    for (const list of [s.bullets, s.enemyBullets, s.geoms]) {
+      for (const o of list) {
+        o.x0 = o.x;
+        o.y0 = o.y;
+      }
+    }
+    this.buffer.push(s);
+    while (this.buffer.length > 2 && this.buffer[0].time < s.time - BUFFER_SECONDS) this.buffer.shift();
+
+    // Score, wave, state and our own status are shown as soon as they arrive.
+    Object.assign(g, { wave: s.wave, score: s.score, mult: s.mult, kills: s.kills, slowT: s.slowT });
+    this.syncState(s.state);
+    for (const sp of s.players) {
+      let p = g.players[sp.slot];
+      if (!p) p = g.players[sp.slot] = createPlayer(sp.x, sp.y, sp.slot);
+      Object.assign(p, { lives: sp.lives, bombs: sp.bombs, shield: sp.shield });
+      p.stats.orbitals = sp.orbitals;
+      if (p === g.player) {
+        if (s.tick >= this.respawnTick) p.alive = sp.alive;
+        p.invuln = Math.max(p.invuln, sp.invuln); // keep our own post-hit grace until the host's arrives
+      } else {
+        p.invuln = sp.invuln;
+      }
+    }
+  }
+
+  /** The buffered moment we draw: a little behind the host, more when the network is jittery. */
+  targetDelay() {
+    return 1.5 / this.rates.snapshot + Math.min(0.25, this.jitter * 2.5) + 0.02;
+  }
+
+  /** Lay out enemies, bullets and the partner at `rt` (host time), between two snapshots. */
+  interpolate(rt) {
+    const g = this.g;
+    const buf = this.buffer;
+    if (!buf.length) return;
+    let a = buf[0];
+    let b = null;
+    for (let i = 0; i < buf.length; i++) {
+      if (buf[i].time <= rt) a = buf[i];
+      else {
+        b = buf[i];
+        break;
+      }
+    }
+    if (a.time > rt) b = null; // older than anything we have: hold the oldest
+    const span = b ? b.time - a.time : 0;
+    const k = b && span > 1e-6 ? clamp((rt - a.time) / span, 0, 1) : 0;
+    const since = clamp(rt - a.time, 0, b ? span : MAX_EXTRAPOLATION);
+    const slow = a.slowT > 0 ? CHRONOS_SCALE : 1;
+
+    // Enemies: matched by id across the two snapshots.
+    const byId = this.enemyById;
+    const list = g.enemies;
+    list.length = 0;
+    for (const se of a.enemies) {
+      let e = byId.get(se.id);
+      if (!e || e.type !== se.type) {
+        e = { ...se, data: { ...se.data }, dead: false, hp: 1, maxHp: 1 };
+        byId.set(se.id, e);
+      }
+      const nb = b?.byId.get(se.id);
+      if (nb) {
+        e.x = lerp(se.x, nb.x, k);
+        e.y = lerp(se.y, nb.y, k);
+        e.angle = se.angle + angleDiff(se.angle, nb.angle) * k;
+        e.spawnT = lerp(se.spawnT, nb.spawnT, k);
+      } else {
+        e.x = se.x + se.vx * since * slow;
+        e.y = se.y + se.vy * since * slow;
+        e.angle = se.angle;
+        e.spawnT = Math.max(0, se.spawnT - since);
+      }
+      Object.assign(e, { vx: se.vx, vy: se.vy, r: se.r, flash: se.flash });
+      Object.assign(e.data, se.data); // merge: the serpent keeps its locally built trail
+      list.push(e);
+    }
+    if (byId.size > list.length * 2 + 32) {
+      const live = new Set(a.enemies.map((e) => e.id));
+      for (const id of byId.keys()) if (!live.has(id)) byId.delete(id);
+    }
+    g.singularities = list.filter((e) => e.type === 'singularity');
+    g.boss = a.bossId ? byId.get(a.bossId) ?? null : null;
+    if (g.boss) {
+      g.boss.hp = a.bossHp;
+      g.boss.maxHp = 1;
+    }
+
+    // Bullets and shards move in straight lines: the older snapshot, advanced by velocity.
+    for (const o of a.bullets) {
+      o.x = o.x0 + o.vx * since;
+      o.y = o.y0 + o.vy * since;
+    }
+    for (const o of a.enemyBullets) {
+      o.x = o.x0 + o.vx * since * slow;
+      o.y = o.y0 + o.vy * since * slow;
+    }
+    for (const o of a.geoms) {
+      o.x = o.x0 + o.vx * since;
+      o.y = o.y0 + o.vy * since;
+      o.a = (o.x0 + o.y0) * 0.01 + rt * 4;
+    }
+    g.bullets = a.bullets;
+    g.enemyBullets = a.enemyBullets;
+    g.geoms = a.geoms;
+
+    // Partner ship.
+    for (const sp of a.players) {
+      const p = g.players[sp.slot];
+      if (!p || p === g.player) continue;
+      const np = b?.players.find((o) => o.slot === sp.slot);
+      if (np && np.alive === sp.alive) {
+        p.x = lerp(sp.x, np.x, k);
+        p.y = lerp(sp.y, np.y, k);
+        p.aim = sp.aim + angleDiff(sp.aim, np.aim) * k;
+      } else {
+        p.x = sp.x + sp.vx * since;
+        p.y = sp.y + sp.vy * since;
+        p.aim = sp.aim;
+      }
+      Object.assign(p, { vx: sp.vx, vy: sp.vy, alive: sp.alive, dashT: sp.dashing ? 0.05 : 0 });
+    }
+  }
+
   guestUpdate(dt) {
     const g = this.g;
     const input = g.input;
@@ -350,14 +493,26 @@ export class CoopSession {
       else if (g.state === 'paused') this.request({ t: 'resume' });
     }
     if (!RUN_STATES.has(g.state)) {
+      this.flushFx();
       if (g.state === 'gameover') g.updateFx(dt);
       else g.updateAmbient(dt);
       g.menuNav();
       return;
     }
     if (g.state !== 'playing') g.menuNav();
-    const slow = g.slowT > 0 ? CHRONOS_SCALE : 1;
     g.time += dt;
+
+    // The world, a little in the past.
+    if (this.offset !== null) {
+      const rt = this.now() + this.offset - this.targetDelay();
+      // Never run backwards (the clock estimate wobbles a little).
+      this.renderTime = Math.max(this.renderTime, rt);
+      if (this.renderTime - rt > RESYNC) this.renderTime = rt;
+      this.interpolate(this.renderTime);
+      this.flushFx(this.renderTime);
+      // Effects stamped far behind (after a pause or hitch) play now rather than never.
+      if (this.fxQueue.length && this.snap && this.fxQueue[0][0] < this.snap.time - 1) this.flushFx(this.snap.time - 1);
+    }
 
     // Our own ship: simulated here, reported to the host.
     const me = g.player;
@@ -371,44 +526,18 @@ export class CoopSession {
       for (const e of g.singularities) singularityPull(e, me, dt);
       clampToArena(g, me);
       this.fire = aim.fire;
-    }
-
-    // Partner: extrapolate the last snapshot and ease toward it.
-    for (const p of g.players) {
-      if (p === me || p.tx === undefined) continue;
-      p.tx += p.vx * dt;
-      p.ty += p.vy * dt;
-      p.x = damp(p.x, p.tx, 18, dt);
-      p.y = damp(p.y, p.ty, 18, dt);
-    }
-    for (const p of g.players) if (p.alive) trailPlayer(g, p, dt);
-
-    for (const e of g.enemies) {
-      if (e.spawnT > 0) e.spawnT -= dt * slow;
-      if (e.flash > 0) e.flash -= dt;
-      e.sx += e.vx * dt * slow;
-      e.sy += e.vy * dt * slow;
-      e.x = damp(e.x, e.sx, 20, dt);
-      e.y = damp(e.y, e.sy, 20, dt);
-      if (e.type === 'singularity') {
-        e.data.pulse = (e.data.pulse ?? 0) + dt * 2.5;
-        g.localFx.grid.applyForce(e.x, e.y, 260, -700 * dt);
+      // Hits on our ship are judged against what we see, then confirmed by the host.
+      if (me.invuln <= 0 && me.dashT <= 0) {
+        g.buildHash();
+        if (g.touchesHazard(me, g._q)) {
+          me.invuln = HIT_INVULN;
+          this.request({ t: 'hit' });
+        }
       }
     }
-    for (const b of g.bullets) {
-      b.x += b.vx * dt;
-      b.y += b.vy * dt;
-    }
-    for (const b of g.enemyBullets) {
-      b.x += b.vx * dt * slow;
-      b.y += b.vy * dt * slow;
-    }
-    for (const s of g.geoms) {
-      s.x += s.vx * dt;
-      s.y += s.vy * dt;
-      s.a += dt * 4;
-      s.life -= dt;
-    }
+    for (const p of g.players) if (p.alive) trailPlayer(g, p, dt);
+    for (const e of g.singularities) g.localFx.grid.applyForce(e.x, e.y, 260, -700 * dt);
+
     g.orbAngle += dt * 3.2;
     g.orbs.length = 0;
     for (const p of g.players) {

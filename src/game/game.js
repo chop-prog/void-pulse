@@ -290,7 +290,7 @@ export class Game {
     tickPlayer(this, p, dt);
     let fire;
     if (p.remote) {
-      fire = p.input.applyTo(p, this);
+      fire = p.input.applyTo(p, this, dt);
       if (p.input.consume('bomb') && p.bombs > 0) this.detonateBomb(p);
     } else {
       fire = movePlayer(this, p, p.input, dt).fire;
@@ -725,7 +725,8 @@ export class Game {
     if (this.state !== 'playing') return;
     const q = this._q;
     for (const p of this.players) {
-      if (!p.alive || p.invuln > 0 || p.dashT > 0) continue;
+      // A remote pilot's hits are judged on their own screen (see net/coop.js), not here.
+      if (!p.alive || p.remote || p.invuln > 0 || p.dashT > 0) continue;
       if (this.touchesHazard(p, q)) this.hitPlayer(p);
     }
   }

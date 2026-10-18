@@ -8,7 +8,7 @@ import { storage } from './storage.js';
 import { hostRoom, joinRoom, OLD_VERSION_HINT } from './net/link.js';
 
 // Shown in the co-op lobby so two players can check they run the same build.
-export const BUILD = 'build 5 · 2026-10-18';
+export const BUILD = 'build 6 · 2026-10-19';
 import { CoopSession } from './net/coop.js';
 import { newRoomCode, parseRoomCode } from './net/signal.js';
 

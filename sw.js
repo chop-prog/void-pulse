@@ -1,7 +1,7 @@
 // Offline support. Network first: online players always run the latest deploy (co-op needs both
 // pilots on the same version), revalidating past the browser's HTTP cache; the cache is only the
 // offline fallback. Bump VERSION to drop old caches on deploy.
-const VERSION = 'void-pulse-v5';
+const VERSION = 'void-pulse-v6';
 const CORE = [
   './',
   './index.html',
