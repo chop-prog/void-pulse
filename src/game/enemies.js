@@ -12,6 +12,30 @@ function steer(e, tx, ty, speed, accel, dt) {
   e.vy += ((dy / d) * speed - e.vy) * k;
 }
 
+/**
+ * A singularity drags ships toward itself (dashing breaks free). Exported so a co-op guest can
+ * apply the same pull to its locally predicted ship.
+ */
+export function singularityPull(e, p, dt) {
+  if (!p.alive || p.dashT > 0) return;
+  const dx = e.x - p.x;
+  const dy = e.y - p.y;
+  const d = Math.hypot(dx, dy) || 1;
+  if (d >= 560) return;
+  const pull = Math.min(240, 8e6 / (d * d));
+  p.x += (dx / d) * pull * dt;
+  p.y += (dy / d) * pull * dt;
+}
+
+/** Distance from point (px, py) to the ray from (x, y) at angle a, or Infinity if behind the start. */
+export function rayDistance(x, y, a, px, py, start = 0) {
+  const dx = px - x;
+  const dy = py - y;
+  const along = dx * Math.cos(a) + dy * Math.sin(a);
+  if (along < start) return Infinity;
+  return Math.abs(dx * Math.sin(a) - dy * Math.cos(a));
+}
+
 function poly(ctx, x, y, r, sides, rot) {
   ctx.moveTo(x + Math.cos(rot) * r, y + Math.sin(rot) * r);
   for (let i = 1; i < sides; i++) {
@@ -57,7 +81,7 @@ export const ENEMIES = {
   seeker: {
     color: '#3df2ff', r: 15, hp: 1, score: 50,
     update(e, g, dt) {
-      const p = g.player;
+      const p = g.nearestPlayer(e.x, e.y);
       steer(e, p.x, p.y, 235 * e.speedMul, 3.2, dt);
       e.angle = Math.atan2(e.vy, e.vx);
     },
@@ -75,7 +99,7 @@ export const ENEMIES = {
   dodger: {
     color: '#4dff88', r: 16, hp: 2, score: 100,
     update(e, g, dt) {
-      const p = g.player;
+      const p = g.nearestPlayer(e.x, e.y);
       steer(e, p.x, p.y, 190 * e.speedMul, 2.4, dt);
       for (const b of g.bullets) {
         const dx = e.x - b.x;
@@ -107,7 +131,7 @@ export const ENEMIES = {
   splitter: {
     color: '#ff4fd8', r: 20, hp: 3, score: 75,
     update(e, g, dt) {
-      const p = g.player;
+      const p = g.nearestPlayer(e.x, e.y);
       steer(e, p.x, p.y, 120 * e.speedMul, 1.5, dt);
       e.angle += dt * 1.2;
     },
@@ -132,7 +156,7 @@ export const ENEMIES = {
   mini: {
     color: '#ff9bf0', r: 9, hp: 1, score: 25,
     update(e, g, dt) {
-      const p = g.player;
+      const p = g.nearestPlayer(e.x, e.y);
       steer(e, p.x, p.y, 310 * e.speedMul, 2.2, dt);
       const w = Math.sin(g.time * 9 + e.id) * 260 * dt;
       e.vx += -e.vy * w * 0.01;
@@ -149,14 +173,14 @@ export const ENEMIES = {
 
   // Keeps its distance, strafes, and fires telegraphed shots.
   sniper: {
-    color: '#ffa53d', r: 17, hp: 3, score: 150,
+    color: '#ffa53d', r: 17, hp: 3, score: 150, sync: ['charge'],
     init(e) {
       e.data.cd = 1.6 + Math.random();
       e.data.charge = 0;
       e.data.side = Math.random() < 0.5 ? 1 : -1;
     },
     update(e, g, dt) {
-      const p = g.player;
+      const p = g.nearestPlayer(e.x, e.y);
       const dx = p.x - e.x;
       const dy = p.y - e.y;
       const d = Math.hypot(dx, dy) || 1;
@@ -200,7 +224,7 @@ export const ENEMIES = {
 
   // Gravity well: bends bullets, drags the player, eats other enemies and grows.
   singularity: {
-    color: '#ff3b5c', r: 24, hp: 16, score: 300, heavy: true,
+    color: '#ff3b5c', r: 24, hp: 16, score: 300, heavy: true, sync: ['pulse'],
     init(e, g) {
       e.data.pulse = 0;
       e.data.absorbed = 0;
@@ -217,17 +241,7 @@ export const ENEMIES = {
       d0.pulse += dt * (2.5 + d0.absorbed * 0.5);
       e.angle += dt * 0.8;
 
-      const p = g.player;
-      if (p.alive && p.dashT <= 0) {
-        const dx = e.x - p.x;
-        const dy = e.y - p.y;
-        const d = Math.hypot(dx, dy) || 1;
-        if (d < 560) {
-          const pull = Math.min(240, 8e6 / (d * d));
-          p.x += (dx / d) * pull * dt;
-          p.y += (dy / d) * pull * dt;
-        }
-      }
+      for (const p of g.players) if (!p.remote) singularityPull(e, p, dt);
       for (const b of g.bullets) {
         const dx = e.x - b.x;
         const dy = e.y - b.y;
@@ -239,7 +253,7 @@ export const ENEMIES = {
         b.vy += (dy / d) * a * dt;
       }
       for (const o of g.enemies) {
-        if (o === e || o.dead || o.spawnT > 0 || o.type === 'singularity' || o.type === 'boss') continue;
+        if (o === e || o.dead || o.spawnT > 0 || o.type === 'singularity' || ENEMIES[o.type].boss) continue;
         const dx = e.x - o.x;
         const dy = e.y - o.y;
         const d = Math.hypot(dx, dy) || 1;
@@ -254,7 +268,7 @@ export const ENEMIES = {
           g.particles.emit(o.x, o.y, { count: 14, color: ENEMIES[o.type].color, speed: 160, life: 0.5 });
         }
       }
-      g.grid.applyForce(e.x, e.y, 260, -700 * dt);
+      g.localFx.grid.applyForce(e.x, e.y, 260, -700 * dt);
       if (d0.absorbed >= 10) {
         // Overload: collapses and spews fragments.
         g.killEnemy(e, { noScore: true });
@@ -281,7 +295,7 @@ export const ENEMIES = {
 
   // Boss: rotating hex core with four attack patterns and an enraged second phase.
   boss: {
-    color: '#ffd84d', r: 66, hp: 1, score: 5000, heavy: true, boss: true,
+    color: '#ffd84d', r: 66, hp: 1, score: 5000, heavy: true, boss: true, title: 'Hydra Core', sync: ['phase'],
     init(e, g) {
       e.maxHp = e.hp = 180 + g.wave * 55;
       e.data = { phase: 1, t: 0, attackT: 2.5, cycle: 0, spiral: 0, spiralCd: 0, spiralA: 0, volleys: 0, volleyT: 0 };
@@ -333,7 +347,7 @@ export const ENEMIES = {
       if (d.volleys > 0 && (d.volleyT -= dt) <= 0) {
         d.volleys--;
         d.volleyT = 0.32;
-        const p = g.player;
+        const p = g.nearestPlayer(e.x, e.y);
         const a = Math.atan2(p.y - e.y, p.x - e.x);
         for (let k = -2; k <= 2; k++) fire(a + k * 0.13, 330);
       }
@@ -358,7 +372,260 @@ export const ENEMIES = {
       ctx.lineWidth = 2.5;
     },
   },
+
+  // Boss 2: octagonal sentinel that sweeps the arena with rotating laser beams.
+  // Beams are telegraphed as thin lines for ~1 s before they turn lethal.
+  warden: {
+    color: '#ff5c8a', r: 58, hp: 1, score: 6000, heavy: true, boss: true, title: 'Laser Warden',
+    sync: ['phase', 'beamA', 'beamMode', 'beamK'],
+    init(e, g) {
+      e.maxHp = e.hp = 220 + g.wave * 50;
+      e.data = { phase: 1, t: 0, attackT: 2.2, cycle: 0, beamMode: 0, beamT: 0, beamA: 0, beamSpin: 0, beamK: 0, bursts: 0, burstT: 0, burstA: 0 };
+    },
+    beams(e) {
+      const n = e.data.phase === 2 ? 4 : 2;
+      return Array.from({ length: n }, (_, k) => e.data.beamA + (k * TAU) / n);
+    },
+    hits(e, p) {
+      if (e.data.beamMode !== 2) return false;
+      for (const a of ENEMIES.warden.beams(e)) if (rayDistance(e.x, e.y, a, p.x, p.y, e.r * 0.6) < 13 + p.r * 0.5) return true;
+      return false;
+    },
+    update(e, g, dt) {
+      const d = e.data;
+      const { W, H } = g.arena;
+      const enraged = d.phase === 2;
+      d.t += dt;
+      steer(e, W / 2 + Math.cos(d.t * 0.21) * W * 0.2, H / 2 + Math.sin(d.t * 0.29) * H * 0.18, enraged ? 85 : 55, 0.8, dt);
+      e.angle += dt * (enraged ? 0.9 : 0.4);
+      if (d.phase === 1 && e.hp < e.maxHp * 0.5) {
+        d.phase = 2;
+        g.bossEnrage(e);
+      }
+
+      if (d.beamMode === 1) {
+        d.beamT -= dt;
+        d.beamK = Math.min(1, 1 - d.beamT / 1.1);
+        d.beamA += d.beamSpin * 0.2 * dt;
+        if (d.beamT <= 0) {
+          d.beamMode = 2;
+          d.beamT = enraged ? 3.8 : 3;
+          g.addTrauma(0.35);
+          g.audio.bomb();
+        }
+      } else if (d.beamMode === 2) {
+        d.beamT -= dt;
+        d.beamA += d.beamSpin * dt;
+        if (d.beamT <= 0) d.beamMode = 0;
+      }
+
+      const fire = (a, speed) => g.fireEnemyBullet(e.x + Math.cos(a) * e.r * 0.8, e.y + Math.sin(a) * e.r * 0.8, a, speed);
+      if (d.bursts > 0 && (d.burstT -= dt) <= 0) {
+        d.bursts--;
+        d.burstT = 0.4;
+        d.burstA += 0.21;
+        const n = enraged ? 18 : 14;
+        for (let i = 0; i < n; i++) fire(d.burstA + (i * TAU) / n, 200);
+      }
+      if (d.beamMode === 0 && (d.attackT -= dt) <= 0) {
+        const attack = ['beams', 'burst', 'beams', 'summon'][d.cycle++ % 4];
+        if (attack === 'beams') {
+          const p = g.nearestPlayer(e.x, e.y);
+          d.beamMode = 1;
+          d.beamT = 1.1;
+          d.beamK = 0;
+          // Start the sweep a quarter turn away from the target so it has to be dodged, not tanked.
+          d.beamA = Math.atan2(p.y - e.y, p.x - e.x) + Math.PI / 2;
+          d.beamSpin = (Math.random() < 0.5 ? -1 : 1) * (enraged ? 0.75 : 0.55);
+          d.attackT = 1.2;
+        } else if (attack === 'burst') {
+          d.bursts = enraged ? 4 : 3;
+          d.attackT = enraged ? 2 : 2.6;
+        } else {
+          const n = enraged ? 4 : 3;
+          for (let i = 0; i < n; i++) {
+            const a = (i * TAU) / n + e.angle;
+            g.spawnEnemy(enraged && i === 0 ? 'sniper' : 'dodger', e.x + Math.cos(a) * (e.r + 80), e.y + Math.sin(a) * (e.r + 80));
+          }
+          d.attackT = enraged ? 2 : 2.6;
+        }
+        g.audio.enemyShoot();
+      }
+    },
+    onDeath(e, g) {
+      g.bossDefeated(e);
+    },
+    draw(ctx, e, t, color) {
+      const d = e.data;
+      const enraged = d.phase === 2;
+      const body = color === '#ffffff' ? color : enraged ? '#ff3b5c' : color;
+      if (d.beamMode > 0) {
+        const L = 2600;
+        for (const a of ENEMIES.warden.beams(e)) {
+          const x0 = e.x + Math.cos(a) * e.r * 0.6;
+          const y0 = e.y + Math.sin(a) * e.r * 0.6;
+          const x1 = e.x + Math.cos(a) * L;
+          const y1 = e.y + Math.sin(a) * L;
+          ctx.beginPath();
+          ctx.moveTo(x0, y0);
+          ctx.lineTo(x1, y1);
+          if (d.beamMode === 1) {
+            ctx.globalAlpha = 0.25 + d.beamK * 0.55;
+            ctx.setLineDash([14, 12]);
+            ctx.strokeStyle = '#ff9ab5';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+            ctx.setLineDash([]);
+          } else {
+            const flicker = 0.85 + Math.sin(t * 60) * 0.15;
+            ctx.globalAlpha = 0.35 * flicker;
+            ctx.strokeStyle = '#ff3b6b';
+            ctx.lineWidth = 30;
+            ctx.stroke();
+            ctx.globalAlpha = 0.9;
+            ctx.strokeStyle = '#ffd0dc';
+            ctx.lineWidth = 7;
+            ctx.stroke();
+          }
+          ctx.globalAlpha = 1;
+        }
+      }
+      ctx.strokeStyle = body;
+      ctx.lineWidth = 4;
+      ctx.beginPath();
+      poly(ctx, e.x, e.y, e.r, 8, e.angle);
+      poly(ctx, e.x, e.y, e.r * 0.68, 4, -e.angle * 1.4);
+      circle(ctx, e.x, e.y, e.r * (0.22 + (d.beamMode === 1 ? d.beamK * 0.12 : 0)));
+      ctx.stroke();
+      ctx.lineWidth = 2.5;
+    },
+  },
+
+  // Boss 3: a pulsing hive that pours out minis and rams the nearest pilot, bursting on impact.
+  brood: {
+    color: '#9dff3d', r: 54, hp: 1, score: 6000, heavy: true, boss: true, title: 'Brood Mother',
+    sync: ['phase', 'mode', 'tx', 'ty'],
+    init(e, g) {
+      e.maxHp = e.hp = 200 + g.wave * 50;
+      e.data = { phase: 1, t: 0, mode: 0, modeT: 3, tx: e.x, ty: e.y, charges: 0, spawnT: 1.5, wx: e.x, wy: e.y };
+    },
+    update(e, g, dt) {
+      const d = e.data;
+      const { W, H } = g.arena;
+      const enraged = d.phase === 2;
+      d.t += dt;
+      e.angle += dt * (d.mode === 2 ? 4 : 0.7);
+      if (d.phase === 1 && e.hp < e.maxHp * 0.5) {
+        d.phase = 2;
+        g.bossEnrage(e);
+      }
+      const impact = () => {
+        const n = enraged ? 24 : 16;
+        for (let i = 0; i < n; i++) {
+          const a = (i * TAU) / n;
+          g.fireEnemyBullet(e.x + Math.cos(a) * e.r, e.y + Math.sin(a) * e.r, a, 230);
+        }
+        g.addTrauma(0.5);
+        g.grid.applyForce(e.x, e.y, 420, 1600);
+        g.addRing(e.x, e.y, { maxR: 260, life: 0.45, color: '#9dff3d', width: 6 });
+        g.audio.explode(2);
+        e.vx *= 0.1;
+        e.vy *= 0.1;
+        if (d.charges > 0) {
+          d.charges--;
+          const p = g.nearestPlayer(e.x, e.y);
+          Object.assign(d, { mode: 1, modeT: 0.55, tx: p.x, ty: p.y });
+        } else {
+          Object.assign(d, { mode: 0, modeT: enraged ? 2.2 : 3 });
+        }
+      };
+
+      if (d.mode === 0) {
+        if (Math.random() < dt * 0.5) {
+          d.wx = 200 + Math.random() * (W - 400);
+          d.wy = 200 + Math.random() * (H - 400);
+        }
+        steer(e, d.wx, d.wy, 70, 0.7, dt);
+        if ((d.spawnT -= dt) <= 0) {
+          d.spawnT = enraged ? 1.1 : 1.6;
+          const n = enraged ? 3 : 2;
+          for (let i = 0; i < n; i++) {
+            const a = Math.random() * TAU;
+            g.spawnEnemy(enraged && i === 0 && Math.random() < 0.35 ? 'splitter' : 'mini', e.x + Math.cos(a) * e.r, e.y + Math.sin(a) * e.r, { telegraph: false, vx: Math.cos(a) * 320, vy: Math.sin(a) * 320 });
+          }
+        }
+        if ((d.modeT -= dt) <= 0) {
+          const p = g.nearestPlayer(e.x, e.y);
+          Object.assign(d, { mode: 1, modeT: 0.9, tx: p.x, ty: p.y, charges: enraged ? 1 : 0 });
+        }
+      } else if (d.mode === 1) {
+        // Wind-up: brake hard and stare down the target.
+        e.vx *= 1 - Math.min(1, 6 * dt);
+        e.vy *= 1 - Math.min(1, 6 * dt);
+        if ((d.modeT -= dt) <= 0) {
+          const a = Math.atan2(d.ty - e.y, d.tx - e.x);
+          const v = enraged ? 1150 : 950;
+          e.vx = Math.cos(a) * v;
+          e.vy = Math.sin(a) * v;
+          d.mode = 2;
+          d.modeT = 1.4;
+          g.audio.dash();
+        }
+      } else {
+        const m = e.r + 3;
+        const wall = e.x <= m || e.y <= m || e.x >= W - m || e.y >= H - m;
+        if (wall || (d.modeT -= dt) <= 0) impact();
+        else if (g.tick % 2 === 0) g.particles.emit(e.x, e.y, { count: 2, color: '#9dff3d', speed: 120, life: 0.4 });
+      }
+    },
+    onDeath(e, g) {
+      g.bossDefeated(e);
+    },
+    draw(ctx, e, t, color) {
+      const d = e.data;
+      const enraged = d.phase === 2;
+      const body = color === '#ffffff' ? color : enraged ? '#e8ff3d' : color;
+      if (d.mode === 1) {
+        ctx.globalAlpha = 0.5 + Math.sin(t * 30) * 0.3;
+        ctx.setLineDash([10, 10]);
+        ctx.strokeStyle = '#d9ff9a';
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(e.x, e.y);
+        ctx.lineTo(d.tx, d.ty);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.beginPath();
+        circle(ctx, d.tx, d.ty, 26);
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+      }
+      const pulse = 1 + Math.sin(t * (enraged ? 9 : 5)) * 0.06;
+      ctx.strokeStyle = body;
+      ctx.lineWidth = 4;
+      ctx.beginPath();
+      const spikes = 9;
+      for (let i = 0; i <= spikes * 2; i++) {
+        const a = e.angle + (i * Math.PI) / spikes;
+        const r = (i % 2 ? e.r * 0.62 : e.r) * pulse;
+        if (i) ctx.lineTo(e.x + Math.cos(a) * r, e.y + Math.sin(a) * r);
+        else ctx.moveTo(e.x + Math.cos(a) * r, e.y + Math.sin(a) * r);
+      }
+      ctx.closePath();
+      circle(ctx, e.x, e.y, e.r * 0.34 * pulse);
+      for (let i = 0; i < 3; i++) {
+        const a = -e.angle * 1.3 + (i * TAU) / 3;
+        circle(ctx, e.x + Math.cos(a) * e.r * 0.34, e.y + Math.sin(a) * e.r * 0.34, 5);
+      }
+      ctx.stroke();
+      ctx.lineWidth = 2.5;
+    },
+  },
 };
+
+/** Boss waves cycle through these, every fifth wave. */
+export const BOSS_ORDER = ['boss', 'warden', 'brood'];
+export const ENEMY_TYPES = Object.keys(ENEMIES);
 
 export const SPAWN_TIME = 0.75;
 

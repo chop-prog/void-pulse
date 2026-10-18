@@ -1,6 +1,6 @@
 // Offline support: stale-while-revalidate for same-origin assets.
 // Bump VERSION to invalidate old caches on deploy.
-const VERSION = 'void-pulse-v1';
+const VERSION = 'void-pulse-v2';
 const CORE = [
   './',
   './index.html',
@@ -19,10 +19,16 @@ const CORE = [
   './src/engine/renderer.js',
   './src/engine/spatial-hash.js',
   './src/game/enemies.js',
+  './src/game/fx-record.js',
   './src/game/game.js',
   './src/game/player.js',
   './src/game/upgrades.js',
   './src/game/waves.js',
+  './src/net/codec.js',
+  './src/net/coop.js',
+  './src/net/link.js',
+  './src/net/mqtt.js',
+  './src/net/signal.js',
 ];
 
 self.addEventListener('install', (e) => {

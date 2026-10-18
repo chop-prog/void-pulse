@@ -2,8 +2,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Rng } from '../src/engine/math.js';
 import {
-  planWave, resolveFormation, waveBudget, isBossWave, ENEMY_COST, UNLOCK_WAVE, FORMATIONS, SAFE_SPAWN_DIST,
+  planWave, resolveFormation, waveBudget, coopBudget, isBossWave, ENEMY_COST, UNLOCK_WAVE, FORMATIONS, SAFE_SPAWN_DIST,
 } from '../src/game/waves.js';
+import { ENEMIES, BOSS_ORDER } from '../src/game/enemies.js';
 
 const ARENA = { W: 2000, H: 1300 };
 
@@ -33,8 +34,39 @@ test('every fifth wave is a boss wave with exactly one boss', () => {
   for (let n = 1; n <= 25; n++) {
     const plan = planWave(n, new Rng(n));
     assert.equal(plan.boss, isBossWave(n));
-    const bosses = plan.groups.filter((g) => g.type === 'boss').reduce((s, g) => s + g.count, 0);
+    const bosses = plan.groups.filter((g) => ENEMIES[g.type].boss).reduce((s, g) => s + g.count, 0);
     assert.equal(bosses, isBossWave(n) ? 1 : 0);
+  }
+});
+
+test('bosses rotate: Hydra Core, Laser Warden, Brood Mother, then around again', () => {
+  const order = [5, 10, 15, 20, 25, 30].map((n) => planWave(n, new Rng(n)).groups.find((g) => ENEMIES[g.type].boss).type);
+  assert.deepEqual(order, ['boss', 'warden', 'brood', 'boss', 'warden', 'brood']);
+  for (const t of BOSS_ORDER) assert.ok(ENEMIES[t].title && ENEMIES[t].boss, `${t} needs a title`);
+});
+
+test('co-op waves bring 50% more hostiles per extra pilot, solo plans are unchanged', () => {
+  for (let n = 1; n <= 20; n++) {
+    assert.equal(coopBudget(n, 1), waveBudget(n));
+    assert.equal(coopBudget(n, 2), Math.round(waveBudget(n) * 1.5));
+    assert.deepEqual(planWave(n, new Rng(9)), planWave(n, new Rng(9), 1));
+    const duo = planWave(n, new Rng(9), 2);
+    if (duo.boss) continue;
+    const spent = duo.groups.reduce((s, g) => s + g.count * ENEMY_COST[g.type], 0);
+    assert.ok(spent <= coopBudget(n, 2) && spent >= coopBudget(n, 2) - 1);
+  }
+});
+
+test('formations keep a safe distance from every co-op pilot', () => {
+  const rng = new Rng(21);
+  const rand = () => rng.next();
+  for (let i = 0; i < 60; i++) {
+    const pilots = [{ x: rng.range(0, 2000), y: rng.range(0, 1300) }, { x: rng.range(0, 2000), y: rng.range(0, 1300) }];
+    for (const f of [...FORMATIONS, 'top']) {
+      for (const [x, y] of resolveFormation(f, 6, pilots, ARENA, rand)) {
+        for (const p of pilots) assert.ok(Math.hypot(x - p.x, y - p.y) >= SAFE_SPAWN_DIST, `${f} too close to a pilot`);
+      }
+    }
   }
 });
 

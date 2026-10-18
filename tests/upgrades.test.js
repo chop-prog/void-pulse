@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Rng } from '../src/engine/math.js';
-import { UPGRADES, RARITY, rollUpgrades, applyUpgrade, availableUpgrades } from '../src/game/upgrades.js';
+import { UPGRADES, UPGRADE_BY_ID, RARITY, LEGENDARY_WAVE, rollUpgrades, applyUpgrade, availableUpgrades } from '../src/game/upgrades.js';
 import { createPlayer, BASE_STATS } from '../src/game/player.js';
 
 test('every upgrade is well-formed', () => {
@@ -41,10 +41,35 @@ test('maxed upgrades are never offered', () => {
 
 test('rarity weights shape the distribution', () => {
   const rng = new Rng(8);
-  const hits = { common: 0, rare: 0, epic: 0 };
-  for (let i = 0; i < 20000; i++) hits[rollUpgrades({}, rng, 1)[0].rarity]++;
+  const hits = { common: 0, rare: 0, epic: 0, legendary: 0 };
+  for (let i = 0; i < 40000; i++) hits[rollUpgrades({}, rng, 1)[0].rarity]++;
   const per = (r) => hits[r] / UPGRADES.filter((u) => u.rarity === r).length;
-  assert.ok(per('common') > per('rare') && per('rare') > per('epic'), JSON.stringify(hits));
+  assert.ok(per('common') > per('rare') && per('rare') > per('epic') && per('epic') > per('legendary'), JSON.stringify(hits));
+  assert.ok(hits.legendary > 0);
+});
+
+test('legendaries are held back until wave 4 and can only be taken once', () => {
+  const legendary = UPGRADES.filter((u) => u.rarity === 'legendary');
+  assert.ok(legendary.length >= 3);
+  for (const u of legendary) assert.equal(u.max, 1);
+  const rng = new Rng(4);
+  for (let wave = 1; wave < LEGENDARY_WAVE; wave++) {
+    for (let i = 0; i < 300; i++) assert.ok(rollUpgrades({}, rng, 3, wave).every((u) => u.rarity !== 'legendary'));
+  }
+  assert.ok(availableUpgrades({}, LEGENDARY_WAVE).some((u) => u.rarity === 'legendary'));
+  const owned = Object.fromEntries(legendary.map((u) => [u.id, 1]));
+  assert.ok(availableUpgrades(owned, 99).every((u) => u.rarity !== 'legendary'));
+});
+
+test('new augments change the right stats', () => {
+  const p = createPlayer(0, 0);
+  const owned = {};
+  for (const id of ['rear', 'nova', 'shield', 'storm', 'phoenix', 'chronos']) applyUpgrade(p, UPGRADE_BY_ID[id], owned);
+  assert.deepEqual(
+    { rear: p.stats.rear, nova: p.stats.nova, shield: p.stats.shield, storm: p.stats.storm, phoenix: p.stats.phoenix, chronos: p.stats.chronos },
+    { rear: 1, nova: 1, shield: 1, storm: 1, phoenix: 1, chronos: 1 },
+  );
+  assert.equal(p.shield, 1, 'shield starts charged');
 });
 
 test('applyUpgrade mutates the player and tracks stacks', () => {

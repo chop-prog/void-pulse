@@ -2,6 +2,7 @@
 // Kept free of DOM/canvas so it can be unit-tested and replayed deterministically (daily runs).
 
 import { TAU, clamp, weightedSample } from '../engine/math.js';
+import { BOSS_ORDER } from './enemies.js';
 
 export const ENEMY_COST = { drifter: 1, seeker: 2, dodger: 4, splitter: 4, sniper: 5, singularity: 12 };
 export const UNLOCK_WAVE = { drifter: 1, seeker: 1, dodger: 3, splitter: 4, sniper: 6, singularity: 7 };
@@ -10,6 +11,10 @@ export const SAFE_SPAWN_DIST = 260;
 
 export const isBossWave = (n) => n > 0 && n % 5 === 0;
 export const waveBudget = (n) => Math.round(8 + n * 5 + Math.pow(n, 1.35));
+/** Bosses rotate: Hydra Core on wave 5, Laser Warden on 10, Brood Mother on 15, then around again. */
+export const bossFor = (n) => BOSS_ORDER[(n / 5 - 1) % BOSS_ORDER.length];
+/** Co-op: each extra pilot brings 50% more hostiles. */
+export const coopBudget = (n, players = 1) => Math.round(waveBudget(n) * (1 + 0.5 * (players - 1)));
 
 function pickType(types, n, rng) {
   const weight = (t) => {
@@ -22,11 +27,11 @@ function pickType(types, n, rng) {
 /**
  * @returns {{ n: number, boss: boolean, budget: number, groups: {at:number,type:string,count:number,formation:string}[] }}
  */
-export function planWave(n, rng) {
+export function planWave(n, rng, players = 1) {
   const groups = [];
   if (isBossWave(n)) {
-    groups.push({ at: 2, type: 'boss', count: 1, formation: 'top' });
-    let budget = Math.round(waveBudget(n) * 0.4);
+    groups.push({ at: 2, type: bossFor(n), count: 1, formation: 'top' });
+    let budget = Math.round(coopBudget(n, players) * 0.4);
     const total = budget;
     let t = 9;
     while (budget >= ENEMY_COST.seeker) {
@@ -39,7 +44,7 @@ export function planWave(n, rng) {
     return { n, boss: true, budget: total, groups };
   }
 
-  const total = waveBudget(n);
+  const total = coopBudget(n, players);
   let budget = total;
   const types = Object.keys(UNLOCK_WAVE).filter((t) => UNLOCK_WAVE[t] <= n);
   const gap = Math.max(0.9, 3.2 - n * 0.12);
@@ -61,21 +66,25 @@ export function planWave(n, rng) {
 
 /**
  * Concrete spawn points for a formation. Guarantees every point is inside the arena
- * (with margin) and at least SAFE_SPAWN_DIST from the player.
+ * (with margin) and at least SAFE_SPAWN_DIST from every player. `players` is one player or
+ * an array of them (co-op); ring and pincer formations close in on one of them at random.
  */
-export function resolveFormation(formation, count, player, arena, rand = Math.random) {
+export function resolveFormation(formation, count, players, arena, rand = Math.random) {
   const { W, H } = arena;
   const M = 60;
   const pts = [];
+  const list = Array.isArray(players) ? players : [players];
+  const player = list.length > 1 ? list[Math.floor(rand() * list.length)] : list[0];
+  const nearest = (x, y) => Math.min(...list.map((p) => Math.hypot(x - p.x, y - p.y)));
   const cl = (x, y) => [clamp(x, M, W - M), clamp(y, M, H - M)];
-  const far = (x, y) => Math.hypot(x - player.x, y - player.y) >= SAFE_SPAWN_DIST;
+  const far = (x, y) => nearest(x, y) >= SAFE_SPAWN_DIST;
   const scatterPoint = () => {
     let best = null;
     let bestD = -1;
-    for (let i = 0; i < 30; i++) {
+    for (let i = 0; i < 40; i++) {
       const x = M + rand() * (W - 2 * M);
       const y = M + rand() * (H - 2 * M);
-      const d = Math.hypot(x - player.x, y - player.y);
+      const d = nearest(x, y);
       if (d >= 380) return [x, y];
       if (d > bestD) { bestD = d; best = [x, y]; }
     }

@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
   <title>VOID PULSE — neon twin-stick roguelite</title>
-  <meta name="description" content="A neon twin-stick roguelite built from scratch in vanilla JavaScript: custom engine, spring-mass warp grid, synthesized audio, zero dependencies.">
+  <meta name="description" content="A neon twin-stick roguelite built from scratch in vanilla JavaScript: online co-op over WebRTC, three bosses, custom engine, spring-mass warp grid, synthesized audio, zero dependencies.">
   <meta name="theme-color" content="#04050b">
   <meta property="og:title" content="VOID PULSE">
   <meta property="og:description" content="Neon twin-stick roguelite. Custom engine, zero dependencies.">
@@ -29,7 +29,7 @@
     <div class="hud-center">
       <div id="wave" class="wave">Wave 1</div>
       <div id="boss" class="boss" hidden>
-        <div class="boss-name">Hydra Core</div>
+        <div id="boss-name" class="boss-name">Hydra Core</div>
         <div class="bar"><i id="boss-fill"></i></div>
       </div>
     </div>
@@ -37,6 +37,7 @@
       <div class="pips-row"><span class="label">Lives</span><span id="lives" class="pips"></span></div>
       <div class="pips-row"><span class="label">Bombs</span><span id="bombs" class="pips"></span></div>
       <div id="dash" class="dash"><span class="label">Dash</span><span class="track"><i id="dash-fill"></i></span></div>
+      <div id="partner" class="partner" hidden></div>
     </div>
     <button id="btn-pause-hud" class="pause-btn" aria-label="Pause">
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14M16 5v14"/></svg>
@@ -56,15 +57,40 @@
       <div class="menu-actions">
         <button id="btn-play" class="btn primary">Play</button>
         <button id="btn-daily" class="btn">Daily run <span id="daily-tag" class="tag"></span></button>
+        <button id="btn-coop" class="btn coop-btn">Co-op online <span class="tag">2P</span></button>
       </div>
-      <p class="best">Best <b id="best-standard">0</b> <span class="sep">/</span> Today's daily <b id="best-daily">0</b></p>
+      <p class="best">Best <b id="best-standard">0</b> <span class="sep">/</span> Today's daily <b id="best-daily">0</b> <span class="sep">/</span> Co-op <b id="best-coop">0</b></p>
       <div class="controls">
         <div><h3>Keyboard + mouse</h3><p><kbd>WASD</kbd> move · <kbd>Mouse</kbd> aim &amp; fire<br><kbd>Shift</kbd> dash · <kbd>Space</kbd>/<kbd>RMB</kbd> bomb · <kbd>Esc</kbd> pause</p></div>
         <div><h3>Gamepad</h3><p>Left stick move · Right stick aim &amp; fire<br><kbd>RB</kbd> dash · <kbd>LB</kbd> bomb · <kbd>Start</kbd> pause</p></div>
         <div><h3>Touch</h3><p>Left thumb moves · Right thumb aims &amp; fires<br>Buttons for dash and bomb</p></div>
       </div>
     </div>
-    <footer class="credits">Vanilla JS · Canvas 2D · Web Audio · zero dependencies · <kbd>`</kbd> for debug overlay</footer>
+    <footer class="credits">Vanilla JS · Canvas 2D · Web Audio · WebRTC co-op · zero dependencies · <kbd>`</kbd> for debug overlay</footer>
+  </section>
+
+  <!-- Online co-op lobby -->
+  <section id="screen-coop" class="screen" aria-label="Online co-op">
+    <div class="panel wide coop">
+      <p class="kicker">Online co-op · 2 pilots</p>
+      <h2>Play with a friend</h2>
+      <p class="coop-lead">Create a room and send your friend the link. Your browsers connect directly to each other. With two pilots, enemies get 60% more health and come in bigger waves.</p>
+      <div id="coop-start" class="coop-block">
+        <button id="btn-host" class="btn primary">Create room</button>
+        <div class="or"><span>or join one</span></div>
+        <form id="coop-join" class="join">
+          <input id="join-code" maxlength="40" placeholder="Room code" autocomplete="off" autocapitalize="characters" spellcheck="false" aria-label="Room code">
+          <button id="btn-join" class="btn" type="submit">Join</button>
+        </form>
+      </div>
+      <div id="coop-room" class="coop-block" hidden>
+        <div class="room-code"><span>Room code</span><b id="room-code">------</b></div>
+        <button id="btn-copy-link" class="btn">Copy invite link</button>
+        <button id="btn-start-coop" class="btn primary" disabled>Start</button>
+      </div>
+      <p id="coop-status" class="coop-status" role="status" aria-live="polite"></p>
+      <button id="btn-coop-back" class="btn ghost">Back</button>
+    </div>
   </section>
 
   <!-- Upgrade -->
@@ -73,7 +99,7 @@
       <p class="kicker">Wave <span id="up-wave">1</span> cleared</p>
       <h2>Choose an augment</h2>
       <div id="cards" class="cards"></div>
-      <p class="hint">Press <kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> or click</p>
+      <p id="up-hint" class="hint">Press <kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> or click</p>
     </div>
   </section>
 

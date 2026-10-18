@@ -5,6 +5,9 @@ import { AudioEngine } from './engine/audio.js';
 import { Game } from './game/game.js';
 import { UI } from './ui.js';
 import { storage } from './storage.js';
+import { hostRoom, joinRoom } from './net/link.js';
+import { CoopSession } from './net/coop.js';
+import { newRoomCode, parseRoomCode } from './net/signal.js';
 
 const settings = {
   muted: false,
@@ -20,16 +23,134 @@ const input = new Input(canvas);
 const audio = new AudioEngine(settings);
 
 let game;
+
+// ── Online co-op lobby ────────────────────────────────────────────────────────
+const lobby = {
+  code: null,
+  room: null,
+
+  inviteUrl(code) {
+    return `${location.origin}${location.pathname}?room=${code}`;
+  },
+
+  open() {
+    ui.coopReset();
+    ui.showScreen('coop');
+  },
+
+  close() {
+    this.code = null;
+    this.room?.close();
+    this.room = null;
+    game.net?.leave();
+    game.role = 'solo';
+  },
+
+  async host() {
+    this.close();
+    const code = newRoomCode();
+    this.code = code;
+    ui.coopRoom(code);
+    ui.coopStatus('Opening the room…', 'wait');
+    try {
+      const room = await hostRoom(code, {
+        onGuest: (link) => {
+          new CoopSession(game, link, 'host', { onEnd: (msg) => this.partnerGone(msg) });
+          ui.coopStatus('Your friend is here. Press Start when you are both ready.', 'good');
+          ui.coopReady(true);
+          audio.ui();
+        },
+        onError: () => ui.coopStatus('Someone tried to join, but a direct connection failed. Ask them to try again.', 'bad'),
+      });
+      if (this.code !== code) return room.close(); // went back while connecting
+      this.room = room;
+      ui.coopStatus('Waiting for your friend. Send them the invite link or the code.', 'wait');
+    } catch (err) {
+      ui.coopStatus(err.message, 'bad');
+    }
+  },
+
+  async join(text) {
+    const code = parseRoomCode(text);
+    if (!code) {
+      ui.coopStatus('A room code is 6 characters, like K7QX2M.', 'bad');
+      return;
+    }
+    this.close();
+    this.code = code;
+    ui.coopBusy(true);
+    ui.coopStatus('Connecting…', 'wait');
+    try {
+      const link = await joinRoom(code);
+      if (this.code !== code) return link.close();
+      new CoopSession(game, link, 'guest', { onEnd: (msg) => this.partnerGone(msg) });
+      ui.coopStatus('Connected! Waiting for the host to press Start…', 'good');
+    } catch (err) {
+      ui.coopStatus(err.message, 'bad');
+    } finally {
+      ui.coopBusy(false);
+    }
+  },
+
+  start() {
+    if (game.role !== 'host') return;
+    audio.unlock();
+    // The run is for these two pilots; stop accepting new guests.
+    this.room?.close();
+    this.room = null;
+    game.newRun();
+  },
+
+  async copyLink() {
+    if (!this.code) return;
+    const url = this.inviteUrl(this.code);
+    try {
+      if (navigator.share && matchMedia('(pointer: coarse)').matches) await navigator.share({ title: 'VOID PULSE co-op', url });
+      else await navigator.clipboard.writeText(url);
+      ui.coopStatus('Invite link copied. Send it to your friend.', 'good');
+    } catch {
+      ui.coopStatus(`Copy this link: ${url}`, '');
+    }
+  },
+
+  /** The other side disconnected. In a run the game carries on (host) or returns to the menu (guest). */
+  partnerGone(message) {
+    if (game.state === 'menu') {
+      ui.showScreen('coop');
+      if (this.room) {
+        ui.coopReady(false);
+        ui.coopStatus(`${message} The room is still open.`, 'wait');
+      } else {
+        ui.coopReset(this.code ?? '');
+        ui.coopStatus(message, 'bad');
+      }
+    }
+  },
+};
+
 const ui = new UI({
   click: () => audio.ui(),
   play: (daily) => {
     audio.unlock();
+    lobby.close();
     game.newRun({ daily });
+  },
+  coop: () => lobby.open(),
+  host: () => lobby.host(),
+  join: (text) => lobby.join(text),
+  copyLink: () => lobby.copyLink(),
+  startCoop: () => lobby.start(),
+  coopBack: () => {
+    lobby.close();
+    ui.showScreen('menu');
   },
   pause: () => game.pause(),
   resume: () => game.resume(),
-  restart: () => game.newRun({ daily: game.mode === 'daily' }),
-  quit: () => game.toMenu(),
+  restart: () => game.restart(),
+  quit: () => {
+    lobby.close();
+    game.toMenu();
+  },
   action: (a) => input.push(a),
   toggleSound: () => {
     settings.muted = !settings.muted;
@@ -85,10 +206,14 @@ addEventListener('pointerdown', unlockAudio, { once: true });
 addEventListener('keydown', unlockAudio, { once: true });
 
 addEventListener('resize', () => renderer.resize());
-addEventListener('blur', () => game.pause());
+// Solo pauses whenever focus leaves. In co-op the host's tab runs the simulation, so only the
+// host hiding the tab pauses the game (for both); a guest tabbing out just stops steering.
+addEventListener('blur', () => {
+  if (game.role === 'solo') game.pause();
+});
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) {
-    game.pause();
+    if (game.role !== 'guest') game.pause();
     audio.suspend();
   } else {
     audio.resume();
@@ -97,6 +222,14 @@ document.addEventListener('visibilitychange', () => {
 
 if ('serviceWorker' in navigator && location.protocol === 'https:') {
   navigator.serviceWorker.register('./sw.js').catch(() => {});
+}
+
+// Invite links: ?room=CODE opens the co-op screen and joins straight away.
+const invited = parseRoomCode(location.search);
+if (invited) {
+  ui.coopReset(invited);
+  ui.showScreen('coop');
+  lobby.join(invited);
 }
 
 // Handy for poking around from the devtools console.

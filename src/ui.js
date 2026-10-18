@@ -2,10 +2,12 @@
 // playfield lives on the canvas. HUD writes are diffed so the DOM is only touched on change.
 
 import { RARITY, UPGRADE_BY_ID } from './game/upgrades.js';
+import { ENEMIES } from './game/enemies.js';
+import { PLAYER_STYLE } from './game/player.js';
 
 const $ = (id) => document.getElementById(id);
 const fmt = (n) => Math.floor(n).toLocaleString('en-US');
-const SCREENS = { menu: 'screen-menu', paused: 'screen-pause', upgrade: 'screen-upgrade', gameover: 'screen-over' };
+const SCREENS = { menu: 'screen-menu', coop: 'screen-coop', paused: 'screen-pause', upgrade: 'screen-upgrade', gameover: 'screen-over' };
 const HUD_STATES = new Set(['playing', 'paused', 'upgrade', 'dying']);
 const icon = (d) => `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="${d}"/></svg>`;
 
@@ -18,9 +20,11 @@ export class UI {
     this.pickArmedAt = 0;
     this.el = {
       hud: $('hud'), score: $('score'), mult: $('mult'), wave: $('wave'), lives: $('lives'), bombs: $('bombs'),
-      dash: $('dash-fill'), dashWrap: $('dash'), boss: $('boss'), bossFill: $('boss-fill'),
-      banner: $('banner'), bannerTitle: $('banner-title'), bannerSub: $('banner-sub'),
-      hurt: $('hurt'), cards: $('cards'), upWave: $('up-wave'), touch: $('touch'), debug: $('debug'),
+      dash: $('dash-fill'), dashWrap: $('dash'), boss: $('boss'), bossFill: $('boss-fill'), bossName: $('boss-name'),
+      partner: $('partner'), banner: $('banner'), bannerTitle: $('banner-title'), bannerSub: $('banner-sub'),
+      hurt: $('hurt'), cards: $('cards'), upWave: $('up-wave'), upHint: $('up-hint'), touch: $('touch'), debug: $('debug'),
+      coopStatus: $('coop-status'), coopStart: $('coop-start'), coopRoom: $('coop-room'), roomCode: $('room-code'),
+      startCoop: $('btn-start-coop'), joinCode: $('join-code'),
     };
 
     const on = (id, fn) => $(id).addEventListener('click', () => {
@@ -29,6 +33,11 @@ export class UI {
     });
     on('btn-play', () => handlers.play(false));
     on('btn-daily', () => handlers.play(true));
+    on('btn-coop', () => handlers.coop());
+    on('btn-host', () => handlers.host());
+    on('btn-copy-link', () => handlers.copyLink());
+    on('btn-start-coop', () => handlers.startCoop());
+    on('btn-coop-back', () => handlers.coopBack());
     on('btn-resume', handlers.resume);
     on('btn-restart', handlers.restart);
     on('btn-quit', handlers.quit);
@@ -39,6 +48,11 @@ export class UI {
     on('btn-shake', handlers.toggleShake);
     on('btn-quality', handlers.toggleQuality);
     $('btn-pause-hud').addEventListener('click', handlers.pause);
+    $('coop-join').addEventListener('submit', (e) => {
+      e.preventDefault();
+      handlers.click();
+      handlers.join(this.el.joinCode.value);
+    });
 
     for (const btn of document.querySelectorAll('[data-action]')) {
       btn.addEventListener('pointerdown', (e) => {
@@ -71,8 +85,8 @@ export class UI {
     this.el.touch.hidden = !(this.touchMode && state === 'playing');
     const screen = SCREENS[state] && $(SCREENS[state]);
     if (screen) {
-      const first = screen.querySelector('button');
-      if (first) setTimeout(() => first.focus({ preventScroll: true }), 60);
+      const first = screen.querySelector('button:not([hidden]):not(:disabled)');
+      if (first && !screen.contains(document.activeElement)) setTimeout(() => first.focus({ preventScroll: true }), 60);
     } else if (document.activeElement instanceof HTMLElement) {
       // Never leave a focused button around while playing — Space would "click" it.
       document.activeElement.blur();
@@ -81,7 +95,7 @@ export class UI {
 
   _buttons() {
     const screen = SCREENS[this.screen] && $(SCREENS[this.screen]);
-    return screen ? [...screen.querySelectorAll('button')].filter((b) => b.offsetParent !== null) : [];
+    return screen ? [...screen.querySelectorAll('button')].filter((b) => b.offsetParent !== null && !b.disabled) : [];
   }
 
   navigate(dir) {
@@ -132,13 +146,31 @@ export class UI {
 
     const boss = g.boss;
     const bossK = boss ? Math.max(0, boss.hp / boss.maxHp) : -1;
-    if (this.cache.bossK !== bossK) {
-      this.cache.bossK = bossK;
+    const bossKey = boss ? `${boss.id}:${boss.type}:${bossK}:${boss.data.phase}` : '';
+    if (this.cache.bossKey !== bossKey) {
+      this.cache.bossKey = bossKey;
       this.el.boss.hidden = !boss;
       if (boss) {
+        this._set('bossName', ENEMIES[boss.type].title);
         this.el.bossFill.style.transform = `scaleX(${bossK})`;
         this.el.boss.classList.toggle('enraged', boss.data.phase === 2);
       }
+    }
+
+    // Co-op: partner status and connection quality.
+    const mate = g.coop ? g.players.find((o) => o !== p) : null;
+    let partner = '';
+    if (mate) {
+      const name = PLAYER_STYLE[mate.slot].name;
+      const status = mate.alive ? `${'♥'.repeat(Math.min(mate.lives, 5))}${mate.lives > 5 ? `+${mate.lives - 5}` : ''}` : 'down';
+      const rtt = g.net?.link ? ` · ${Math.round(g.net.link.rtt)} ms` : '';
+      partner = `${name} ${status}${rtt}`;
+    }
+    if (this.cache.partner !== partner) {
+      this.cache.partner = partner;
+      this.el.partner.hidden = !partner;
+      this.el.partner.textContent = partner;
+      if (mate) this.el.partner.style.setProperty('--c', PLAYER_STYLE[mate.slot].glow);
     }
   }
 
@@ -164,9 +196,10 @@ export class UI {
   }
 
   // ── Screens ──────────────────────────────────────────────────────────────────
-  setBest(standard, daily, date) {
+  setBest(standard, daily, date, coop = 0) {
     $('best-standard').textContent = fmt(standard);
     $('best-daily').textContent = fmt(daily);
+    $('best-coop').textContent = fmt(coop);
     $('daily-tag').textContent = date;
   }
 
@@ -180,6 +213,7 @@ export class UI {
     this.onPick = onPick;
     this.pickArmedAt = performance.now() + 450; // ignore clicks from a held fire button
     this.el.upWave.textContent = wave;
+    this.el.upHint.hidden = false;
     this.el.cards.innerHTML = choices.map((u, i) => `
       <button class="card" data-rarity="${u.rarity}" data-i="${i}" style="--d:${i * 80}ms">
         <span class="card-key">${i + 1}</span>
@@ -188,6 +222,15 @@ export class UI {
         <span class="card-desc">${u.desc}</span>
         <span class="card-meta">${RARITY[u.rarity].label} · ${owned[u.id] || 0}/${u.max}</span>
       </button>`).join('');
+    if (this.screen === 'upgrade') setTimeout(() => this.el.cards.querySelector('button')?.focus({ preventScroll: true }), 60);
+  }
+
+  /** Co-op: you've picked, your partner hasn't yet. */
+  showUpgradeWaiting(wave) {
+    this.onPick = null;
+    this.el.upWave.textContent = wave;
+    this.el.upHint.hidden = true;
+    this.el.cards.innerHTML = '<p class="waiting"><span class="spinner" aria-hidden="true"></span>Waiting for your partner to choose…</p>';
   }
 
   pick(i) {
@@ -197,7 +240,7 @@ export class UI {
 
   showGameOver(s) {
     this.summary = s;
-    $('over-mode').textContent = s.mode === 'daily' ? `Daily run · ${s.date}` : 'Standard run';
+    $('over-mode').textContent = s.mode === 'daily' ? `Daily run · ${s.date}` : s.mode === 'coop' ? 'Online co-op' : 'Standard run';
     $('over-score').textContent = fmt(s.score);
     $('over-best').hidden = !s.isBest;
     const mins = Math.floor(s.time / 60);
@@ -218,7 +261,7 @@ export class UI {
   async copyResult() {
     const s = this.summary;
     if (!s) return;
-    const mode = s.mode === 'daily' ? `Daily ${s.date}` : 'Standard';
+    const mode = s.mode === 'daily' ? `Daily ${s.date}` : s.mode === 'coop' ? 'Online co-op' : 'Standard';
     const text = `VOID PULSE · ${mode}\n${fmt(s.score)} pts · wave ${s.wave} · ${fmt(s.kills)} kills · peak ×${s.peakMult}\n${location.origin}${location.pathname}`;
     const btn = $('btn-copy');
     try {
@@ -227,5 +270,35 @@ export class UI {
     } catch {
       btn.textContent = 'Copy failed';
     }
+  }
+
+  // ── Co-op lobby ──────────────────────────────────────────────────────────────
+  coopReset(code = '') {
+    this.el.coopStart.hidden = false;
+    this.el.coopRoom.hidden = true;
+    this.el.joinCode.value = code;
+    this.el.startCoop.disabled = true;
+    this.coopStatus('');
+  }
+
+  coopRoom(code) {
+    this.el.coopStart.hidden = true;
+    this.el.coopRoom.hidden = false;
+    this.el.roomCode.textContent = code;
+    this.el.startCoop.disabled = true;
+  }
+
+  coopStatus(text, kind = '') {
+    this.el.coopStatus.textContent = text;
+    this.el.coopStatus.className = `coop-status ${kind}`;
+  }
+
+  coopReady(ready) {
+    this.el.startCoop.disabled = !ready;
+    if (ready) this.el.startCoop.focus({ preventScroll: true });
+  }
+
+  coopBusy(busy) {
+    for (const id of ['btn-host', 'btn-join']) $(id).disabled = busy;
   }
 }

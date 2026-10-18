@@ -3,7 +3,7 @@
 # VOID PULSE
 
 **A neon twin-stick roguelite built from scratch in vanilla JavaScript.**
-Custom engine · spring-mass warp grid · synthesized audio · zero dependencies · no build step.
+Custom engine · online co-op over WebRTC · spring-mass warp grid · synthesized audio · zero dependencies · no build step.
 
 [**▶ Play in the browser**](https://chop-prog.github.io/void-pulse/) &nbsp;·&nbsp; works on desktop, gamepad and mobile
 
@@ -17,15 +17,45 @@ Most browser games lean on Phaser, Pixi or Three.js. VOID PULSE uses **none** of
 
 ## Features
 
-- **7 enemy archetypes with distinct AI.** Seekers home in. Dodgers read incoming bullets and sidestep them. Splitters burst into fragments. Snipers hold range and fire telegraphed shots. Singularities bend bullets, drag the player and eat other enemies until they overload.
-- **Boss fight.** Every 5th wave brings the *Hydra Core*. It has four attack patterns (radial burst, spiral, aimed volleys, summons) and an enraged second phase.
-- **Roguelite build-crafting.** 15 augments across 3 rarities (multishot, piercing, ricochet, homing, orbital drones, chain lightning and more), offered as a pick of 3 between waves.
+- **Online co-op for two.** Create a room, send a friend the link, and fly together. Browsers connect directly over WebRTC. With two pilots, enemies get 60% more health (75% for bosses) and waves are 50% bigger. A downed pilot spectates and rejoins at the start of the next wave; the run ends only when both are down.
+- **7 enemy archetypes with distinct AI.** Seekers home in. Dodgers read incoming bullets and sidestep them. Splitters burst into fragments. Snipers hold range and fire telegraphed shots. Singularities bend bullets, drag ships and eat other enemies until they overload. In co-op every enemy targets the nearest pilot.
+- **Three bosses in rotation**, every 5th wave, each with an enraged second phase:
+  - *Hydra Core*: radial bursts, spirals, aimed volleys and summons;
+  - *Laser Warden*: telegraphed laser beams that sweep the arena (two, then four), bullet flowers and dodger escorts;
+  - *Brood Mother*: pours out swarms of minis, winds up, and rams the nearest pilot, bursting into a bullet ring on impact.
+- **Roguelite build-crafting.** 21 augments across 4 rarities, offered as a pick of 3 between waves. Legendaries enter the pool from wave 4: *Bullet Storm* (every 4th volley is a 16-shot ring), *Phoenix Core* (survive one fatal hit in a blast) and *Chronos* (dashing slows every enemy). New epics include rear guns, a periodic *Nova Pulse* shockwave and a recharging *Aegis Shield*. In co-op each pilot picks their own.
 - **Daily run.** A seed derived from the UTC date gives every player on Earth the same waves and the same upgrade offers.
 - **Game feel.** Hit-stop, trauma-based screen shake, a warping background grid, bloom, a score multiplier fed by shards, and a "mercy blast" so a single hit never chains into an instant second death.
 - **Every input device.** Keyboard + mouse, gamepad (standard mapping, including menu navigation) and dual floating virtual sticks on touch screens.
 - **Installable PWA** that works offline, with persistent best scores and settings.
 
 ![Boss fight: the Hydra Core's spiral bullet pattern](docs/boss.jpg)
+
+## Online co-op: how it works
+
+```mermaid
+sequenceDiagram
+  participant H as Host browser
+  participant B as Public MQTT brokers ×3
+  participant G as Guest browser
+  H->>B: subscribe to a topic hashed from the room code
+  G->>B: offer SDP (AES-GCM, key derived from the room code)
+  B->>H: offer
+  H->>B: answer SDP (encrypted)
+  B->>G: answer
+  Note over H,G: WebRTC data channels, browser to browser
+  loop every frame
+    G->>H: ship state, 60 Hz (44 bytes, unreliable)
+    H->>G: world snapshot, 30 Hz (binary, unreliable)
+    H->>G: effect batch: explosions, sounds, banners (JSON, reliable)
+  end
+```
+
+- **No game server.** GitHub Pages only serves static files, so the two browsers find each other through public MQTT brokers ([`mqtt.js`](src/net/mqtt.js) is a ~150-line MQTT 3.1.1 client), swap one WebRTC offer and answer, then talk directly. Signalling goes to three brokers at once, so one being down doesn't matter. Messages are encrypted with a key derived from the room code, and the topic is a hash of the code, so the brokers see only ciphertext ([`signal.js`](src/net/signal.js)).
+- **Host-authoritative simulation.** The host runs the real game (enemies, bullets, damage, scoring, upgrades) and streams a quantised binary snapshot ([`codec.js`](src/net/codec.js)). Positions and velocities are int16 and angles are int16 × 10⁻⁴. Of each enemy's behaviour state, only the fields its type declares in `sync` are sent, because those are all `draw()` needs. A late-game frame with 150 enemies and 1,000 bullets is under 20 KB; a typical one is a few KB.
+- **No input lag for the guest.** The guest flies its own ship locally and reports position, aim and trigger; the host fires the guest's guns from that report. Everything else is extrapolated along its velocity between snapshots and eased toward the newest one ([`coop.js`](src/net/coop.js)).
+- **Same effects on both screens.** On the host, particle, grid, audio and banner calls go through a recording proxy ([`fx-record.js`](src/game/fx-record.js)), and the guest replays the batch on its own systems. Purely local effects (engine trails, grid wakes) bypass it and are recomputed on each side.
+- **Tested without a network.** [`tests/coop.test.js`](tests/coop.test.js) runs a real host `Game` and a real guest `Game` joined by an in-memory link carrying the same messages. It checks that the worlds stay in sync and that the guest's ship and guns work. It also covers the downed-pilot, shared-upgrade, game-over and disconnect flows.
 
 ## Engineering highlights
 
@@ -87,7 +117,7 @@ Otherwise, note that ES modules must be served over HTTP (opening `index.html` f
 
 ```bash
 npm start          # zero-dependency dev server → http://localhost:5173
-npm test           # 27 unit tests on Node's built-in test runner
+npm test           # 49 tests on Node's built-in test runner
 ```
 
 Any static server works too, for example `python -m http.server`.
@@ -100,8 +130,11 @@ Any static server works too, for example `python -m http.server`.
 - the warp grid settling back to rest and keeping its border pinned;
 - particle capacity, motion and swap-remove packing;
 - wave plans: budget, unlock order, boss cadence, and determinism per seed;
-- spawn formations: always inside the arena and at a safe distance from the player;
-- upgrade rolls: no duplicates, no maxed upgrades, rarity distribution;
+- spawn formations: always inside the arena and at a safe distance from every pilot;
+- upgrade rolls: no duplicates, no maxed upgrades, rarity distribution, legendaries held back until wave 4;
+- bosses: each of the three survives 25 s of its own pattern, enrages at half health and dies cleanly; laser hitboxes;
+- the co-op wire format (snapshot and input round-trips, size budget), MQTT packet framing across split chunks, room codes and encrypted signalling;
+- a full co-op session between two in-memory games;
 - PRNG uniformity, angle wrapping, and frame-rate-independent damping.
 
 [GitHub Actions](.github/workflows/ci.yml) runs the tests on Node 22 and 24 for every push and PR, then deploys `main` to GitHub Pages.
@@ -111,7 +144,8 @@ Any static server works too, for example `python -m http.server`.
 ```
 src/
   engine/          game-agnostic: loop, input, audio, renderer, particles, grid, spatial hash, math
-  game/            game.js (state machine & systems), enemies, player, waves, upgrades
+  game/            game.js (state machine & systems), enemies & bosses, player, waves, upgrades, fx recording
+  net/             online co-op: MQTT signalling, WebRTC link, binary codec, session sync
   ui.js            DOM HUD, menus, upgrade cards, game-over summary
   main.js          bootstrap, settings, adaptive quality, PWA registration
 tests/             node:test suites for the pure modules
