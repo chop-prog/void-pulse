@@ -48,7 +48,7 @@ test('rarity weights shape the distribution', () => {
   assert.ok(hits.legendary > 0);
 });
 
-test('legendaries are held back until wave 4 and can only be taken once', () => {
+test(`legendaries are held back until wave ${LEGENDARY_WAVE} and can only be taken once`, () => {
   const legendary = UPGRADES.filter((u) => u.rarity === 'legendary');
   assert.ok(legendary.length >= 3);
   for (const u of legendary) assert.equal(u.max, 1);
@@ -59,6 +59,42 @@ test('legendaries are held back until wave 4 and can only be taken once', () => 
   assert.ok(availableUpgrades({}, LEGENDARY_WAVE).some((u) => u.rarity === 'legendary'));
   const owned = Object.fromEntries(legendary.map((u) => [u.id, 1]));
   assert.ok(availableUpgrades(owned, 99).every((u) => u.rarity !== 'legendary'));
+});
+
+test('an offer never holds more than one epic or legendary', () => {
+  const rng = new Rng(13);
+  for (let i = 0; i < 3000; i++) {
+    const premium = rollUpgrades({}, rng, 3, 20).filter((u) => u.rarity === 'epic' || u.rarity === 'legendary');
+    assert.ok(premium.length <= 1);
+  }
+});
+
+test('epics and legendaries stay rare across simulated runs', () => {
+  const rng = new Rng(2024);
+  let offers = 0;
+  let withEpic = 0;
+  let withLegend = 0;
+  let runsWithLegend = 0;
+  for (let run = 0; run < 3000; run++) {
+    const p = createPlayer(0, 0);
+    let saw = false;
+    for (let wave = 1; wave <= 15; wave++) {
+      const roll = rollUpgrades(p.owned, rng, 3, wave);
+      offers++;
+      if (roll.some((u) => u.rarity === 'epic')) withEpic++;
+      if (roll.some((u) => u.rarity === 'legendary')) {
+        withLegend++;
+        saw = true;
+      }
+      applyUpgrade(p, roll[Math.floor(rng.next() * roll.length)], p.owned);
+    }
+    if (saw) runsWithLegend++;
+  }
+  const epicRate = withEpic / offers;
+  const legendRate = withLegend / offers;
+  assert.ok(epicRate > 0.07 && epicRate < 0.14, `epic in ${(epicRate * 100).toFixed(1)}% of offers`);
+  assert.ok(legendRate > 0.004 && legendRate < 0.02, `legendary in ${(legendRate * 100).toFixed(1)}% of offers`);
+  assert.ok(runsWithLegend / 3000 < 0.25, `${((runsWithLegend / 3000) * 100).toFixed(1)}% of runs see a legendary`);
 });
 
 test('new augments change the right stats', () => {

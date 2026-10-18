@@ -1,43 +1,75 @@
-// Direct browser-to-browser connection (WebRTC data channels) for online co-op.
+// Browser-to-browser connection for online co-op.
 //
-//   ctl   — reliable, ordered JSON: lobby, effects, upgrades, pause, pings
-//   state — unreliable, unordered binary: world snapshots (host → guest) and ship state
-//           (guest → host). A late snapshot is useless, so lost ones are never re-sent.
+// 1. Signalling (signal.js): the guest sends a WebRTC offer, the host answers.
+// 2. Direct link (WebRTC data channels), tried first:
+//      ctl   — reliable, ordered JSON: lobby, effects, upgrades, pause, pings
+//      state — unreliable, unordered binary: world snapshots and ship state; a late
+//              snapshot is useless, so lost ones are never re-sent
+// 3. If no direct path opens within a few seconds (symmetric NAT / CGNAT, common on mobile
+//    carriers), both sides fall back to a relay through a shared MQTT broker (relay.js).
 //
-// The guest makes the offer; both sides wait for ICE gathering to finish and send one complete
-// SDP each way through the signalling channel (no trickle ICE: fewer messages, simpler code).
+// No trickle ICE: each side waits briefly for its candidates and sends one complete SDP.
 
-import { Signal } from './signal.js';
+import { Signal, pickRelayBroker } from './signal.js';
+import { RelayLink } from './relay.js';
 
 const ICE_SERVERS = [
   { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] },
   { urls: 'stun:stun.cloudflare.com:3478' },
 ];
-const CONNECT_TIMEOUT = 20000;
+const ANSWER_TIMEOUT = 15000;
+const DIRECT_TIMEOUT = 6000;
+const RELAY_TIMEOUT = 12000;
+const RESEND_EVERY = 1500;
 
 const timeout = (promise, ms, message) => Promise.race([
   promise,
   new Promise((_, reject) => setTimeout(() => reject(new Error(message)), ms)),
 ]);
 
-function iceGathered(pc, ms = 2500) {
+/** Wait for ICE candidates, but not for long: once a public (srflx) one is in, more rarely helps. */
+function iceGathered(pc, max = 1500) {
   return new Promise((resolve) => {
     if (pc.iceGatheringState === 'complete') return resolve();
+    let early = 0;
+    const cap = setTimeout(() => done(), max);
     const done = () => {
-      if (pc.iceGatheringState === 'complete') resolve();
+      clearTimeout(cap);
+      clearTimeout(early);
+      resolve();
     };
-    pc.addEventListener('icegatheringstatechange', done);
-    setTimeout(resolve, ms); // good enough: host + STUN candidates arrive well before this
+    pc.addEventListener('icegatheringstatechange', () => pc.iceGatheringState === 'complete' && done());
+    pc.addEventListener('icecandidate', (e) => {
+      if (e.candidate && / typ (srflx|relay)/.test(e.candidate.candidate) && !early) early = setTimeout(done, 250);
+    });
   });
 }
 
-function channelOpen(ch) {
-  return ch.readyState === 'open' ? Promise.resolve() : new Promise((resolve) => ch.addEventListener('open', resolve, { once: true }));
+/** Resolves when every channel is open; rejects on timeout or when ICE gives up. */
+function channelsOpen(pc, channels, ms) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('direct timeout')), ms);
+    const check = () => {
+      if (channels.every((c) => c && c.readyState === 'open')) {
+        clearTimeout(timer);
+        resolve();
+      }
+    };
+    for (const c of channels) c?.addEventListener('open', check);
+    pc.addEventListener('iceconnectionstatechange', () => {
+      if (pc.iceConnectionState === 'failed') {
+        clearTimeout(timer);
+        reject(new Error('ice failed'));
+      }
+    });
+    check();
+  });
 }
 
 export class Link {
   constructor(pc, ctl, state) {
     Object.assign(this, { pc, ctl, state });
+    this.kind = 'direct';
     this.rtt = 0;
     this.closed = false;
     this.onCtl = null;
@@ -96,75 +128,143 @@ export class Link {
 }
 
 /**
- * Open a room and wait for guests. Calls `onGuest(link)` for each connected guest; while one is
- * connected, other join attempts are told the room is busy. Returns `{ close() }`.
+ * Open a room and wait for a guest. `onGuest(link)` fires when one is connected (directly or
+ * via the relay); `onStatus(kind)` reports 'connecting' | 'relay' | 'failed' for the lobby.
+ * While a guest is connected, other join attempts are told the room is full. A new attempt
+ * replaces one that is still connecting, so a friend who retries is never locked out.
  */
-export async function hostRoom(code, { onGuest, onError } = {}) {
+export async function hostRoom(code, { onGuest, onStatus } = {}) {
   const signal = await Signal.open(code);
-  let current = null; // guest id being connected or connected
-  signal.listen('host', async (msg) => {
-    if (msg.kind !== 'offer' || msg.from === current) return; // guests re-send their offer until answered
-    if (current) {
-      signal.send(`g-${msg.from}`, { kind: 'busy' });
-      return;
-    }
-    current = msg.from;
+  let connected = null;
+  let attempt = null;
+
+  const run = async (msg) => {
     const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+    const me = { from: msg.from, cancelled: false, relay: null };
+    me.cancel = () => {
+      me.cancelled = true;
+      pc.close();
+    };
+    const relayRequest = new Promise((resolve) => {
+      me.relay = resolve;
+    });
+    attempt = me;
+    onStatus?.('connecting');
     try {
       const channels = {};
-      const arrived = new Promise((resolve) => {
-        pc.ondatachannel = (e) => {
-          channels[e.channel.label] = e.channel;
-          if (channels.ctl && channels.state) resolve();
+      pc.ondatachannel = (e) => {
+        channels[e.channel.label] = e.channel;
+      };
+      const deadline = performance.now() + DIRECT_TIMEOUT + RELAY_TIMEOUT;
+      const direct = new Promise((resolve) => {
+        const wait = () => {
+          if (me.cancelled || performance.now() > deadline) return; // the relay or the timeout decides instead
+          if (channels.ctl && channels.state) channelsOpen(pc, [channels.ctl, channels.state], deadline - performance.now()).then(() => resolve('direct'), () => {});
+          else setTimeout(wait, 50);
         };
+        wait();
       });
       await pc.setRemoteDescription(msg.sdp);
       await pc.setLocalDescription(await pc.createAnswer());
       await iceGathered(pc);
-      await signal.send(`g-${msg.from}`, { kind: 'answer', sdp: pc.localDescription.toJSON() });
-      await timeout(arrived.then(() => Promise.all([channelOpen(channels.ctl), channelOpen(channels.state)])), CONNECT_TIMEOUT, 'Direct connection failed');
-      const link = new Link(pc, channels.ctl, channels.state);
+      if (me.cancelled) return;
+      await signal.send(`g-${msg.from}`, { kind: 'answer', sdp: pc.localDescription.toJSON(), brokers: signal.brokers });
+      const winner = await timeout(Promise.race([direct, relayRequest]), DIRECT_TIMEOUT + RELAY_TIMEOUT, 'join timed out');
+      if (me.cancelled) return;
+      let link;
+      if (winner === 'direct') {
+        link = new Link(pc, channels.ctl, channels.state);
+      } else {
+        pc.close();
+        onStatus?.('relay');
+        const client = signal.pin(winner.broker);
+        if (!client) throw new Error('relay broker not available');
+        link = new RelayLink(client, signal.key, signal.topic, 'host', msg.from);
+        link.sendCtl({ t: 'hello' });
+      }
+      attempt = null;
+      connected = link;
       link.closeHooks.push(() => {
-        current = null;
+        connected = null;
       });
       onGuest?.(link);
     } catch (err) {
+      if (me.cancelled) return;
       pc.close();
-      current = null;
-      onError?.(err);
+      if (attempt === me) attempt = null;
+      onStatus?.('failed', err);
     }
+  };
+
+  signal.listen('host', (msg) => {
+    if (msg.kind === 'relay') {
+      if (attempt?.from === msg.from) attempt.relay(msg);
+      return;
+    }
+    if (msg.kind !== 'offer') return;
+    if (connected && !connected.closed) {
+      signal.send(`g-${msg.from}`, { kind: 'busy' });
+      return;
+    }
+    if (attempt?.from === msg.from) return; // guests re-send their offer until answered
+    attempt?.cancel();
+    run(msg);
   });
   return { close: () => signal.close() };
 }
 
-/** Join a room by code. Resolves with an open Link, or rejects with a readable reason. */
-export async function joinRoom(code) {
+/**
+ * Join a room by code. Resolves with an open link (direct or relay), or rejects with a
+ * readable reason. `onStatus(text)` narrates progress for the lobby.
+ */
+export async function joinRoom(code, { onStatus } = {}) {
+  onStatus?.('Reaching the lobby servers…');
   const signal = await Signal.open(code);
   const me = Math.random().toString(36).slice(2, 12);
   const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
   const ctl = pc.createDataChannel('ctl', { ordered: true });
   const state = pc.createDataChannel('state', { ordered: false, maxRetransmits: 0 });
   let resend = 0;
+  let relay = null;
   try {
     const answer = new Promise((resolve, reject) => {
       signal.listen(`g-${me}`, (m) => {
-        if (m.kind === 'answer') resolve(m.sdp);
+        if (m.kind === 'answer') resolve(m);
         else if (m.kind === 'busy') reject(new Error('That room already has two players.'));
       });
     });
     await pc.setLocalDescription(await pc.createOffer());
     await iceGathered(pc);
-    const offer = { kind: 'offer', from: me, sdp: pc.localDescription.toJSON() };
-    signal.send('host', offer);
-    resend = setInterval(() => signal.send('host', offer), 2500);
-    const sdp = await timeout(answer, CONNECT_TIMEOUT, 'Room not found. Check the code, and that your friend still has the room open.');
+    onStatus?.('Looking for the room…');
+    const offer = () => ({ kind: 'offer', from: me, sdp: pc.localDescription.toJSON(), brokers: signal.brokers });
+    signal.send('host', offer());
+    resend = setInterval(() => signal.send('host', offer()), RESEND_EVERY);
+    const ans = await timeout(answer, ANSWER_TIMEOUT, 'Room not found. Check the code, and that your friend still has the room open.');
     clearInterval(resend);
-    await pc.setRemoteDescription(sdp);
-    await timeout(Promise.all([channelOpen(ctl), channelOpen(state)]), CONNECT_TIMEOUT,
-      'Found the room, but a direct connection could not be made. Strict networks (some mobile carriers, office Wi-Fi) can block it; try another network.');
-    return new Link(pc, ctl, state);
+
+    onStatus?.('Room found. Connecting…');
+    await pc.setRemoteDescription(ans.sdp);
+    const direct = await channelsOpen(pc, [ctl, state], DIRECT_TIMEOUT).then(() => true, () => false);
+    if (direct) return new Link(pc, ctl, state);
+
+    // No direct path: relay through a broker we both reach.
+    pc.close();
+    const broker = pickRelayBroker(signal.brokers, ans.brokers ?? []);
+    if (!broker) throw new Error('Could not connect: your network blocks direct connections and no relay is reachable. Try another network.');
+    onStatus?.('Direct connection blocked by the network. Switching to the relay…');
+    relay = new RelayLink(signal.pin(broker), signal.key, signal.topic, 'guest', me);
+    const hello = new Promise((resolve) => {
+      relay.onCtl = (m) => m.t === 'hello' && resolve();
+    });
+    const request = { kind: 'relay', from: me, broker };
+    signal.send('host', request);
+    resend = setInterval(() => signal.send('host', request), RESEND_EVERY);
+    await timeout(hello, RELAY_TIMEOUT, 'Could not connect through the relay either. Try again, or try another network.');
+    relay.onCtl = null;
+    return relay;
   } catch (err) {
     pc.close();
+    relay?.close(false);
     throw err;
   } finally {
     clearInterval(resend);

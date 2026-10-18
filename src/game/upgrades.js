@@ -5,12 +5,15 @@ import { weightedSample } from '../engine/math.js';
 export const RARITY = {
   common: { weight: 10, label: 'Common' },
   rare: { weight: 4.5, label: 'Rare' },
-  epic: { weight: 1.8, label: 'Epic' },
-  legendary: { weight: 0.75, label: 'Legendary' },
+  epic: { weight: 0.75, label: 'Epic' },
+  legendary: { weight: 0.2, label: 'Legendary' },
 };
 
 /** Legendaries only enter the pool once a run has proven itself. */
-export const LEGENDARY_WAVE = 4;
+export const LEGENDARY_WAVE = 6;
+
+/** Epic and legendary cards are the exciting ones; an offer never shows more than one of them. */
+const PREMIUM = new Set(['epic', 'legendary']);
 
 // Icons are 24×24 stroke paths rendered as inline SVG.
 export const UPGRADES = [
@@ -67,9 +70,20 @@ export function availableUpgrades(owned, wave = Infinity) {
   return UPGRADES.filter((u) => (owned[u.id] || 0) < u.max && (u.rarity !== 'legendary' || wave >= LEGENDARY_WAVE));
 }
 
-/** Offer `count` distinct, non-maxed upgrades, weighted by rarity. */
+/**
+ * Offer `count` distinct, non-maxed upgrades, weighted by rarity, with at most one epic or
+ * legendary among them. Measured with these weights: an epic shows up in about 1 offer in 10,
+ * a legendary in about 1 in 60 once it is unlocked (see tests/upgrades.test.js).
+ */
 export function rollUpgrades(owned, rng, count = 3, wave = Infinity) {
-  return weightedSample(availableUpgrades(owned, wave), (u) => RARITY[u.rarity].weight, count, rng);
+  let pool = availableUpgrades(owned, wave);
+  const out = [];
+  while (out.length < count && pool.length) {
+    const [u] = weightedSample(pool, (x) => RARITY[x.rarity].weight, 1, rng);
+    out.push(u);
+    pool = pool.filter((x) => x !== u && !(PREMIUM.has(u.rarity) && PREMIUM.has(x.rarity)));
+  }
+  return out;
 }
 
 export function applyUpgrade(player, upgrade, owned) {

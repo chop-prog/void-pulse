@@ -163,7 +163,8 @@ export class UI {
     if (mate) {
       const name = PLAYER_STYLE[mate.slot].name;
       const status = mate.alive ? `${'♥'.repeat(Math.min(mate.lives, 5))}${mate.lives > 5 ? `+${mate.lives - 5}` : ''}` : 'down';
-      const rtt = g.net?.link ? ` · ${Math.round(g.net.link.rtt)} ms` : '';
+      const link = g.net?.link;
+      const rtt = link ? ` · ${Math.round(link.rtt)} ms${link.kind === 'relay' ? ' · relay' : ''}` : '';
       partner = `${name} ${status}${rtt}`;
     }
     if (this.cache.partner !== partner) {

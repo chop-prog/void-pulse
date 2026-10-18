@@ -1,17 +1,18 @@
 // Signalling over public MQTT brokers. Two browsers that know the same room code meet on a
-// topic derived from it and swap a WebRTC offer and answer; after that they talk directly
-// and the brokers are no longer involved.
+// topic derived from it and swap a WebRTC offer and answer; after that they talk directly.
+// If a direct connection is impossible (strict NAT), the same brokers relay the game.
 //
 // Every message is encrypted with AES-GCM under a key derived from the room code, so the
 // brokers (and anyone else subscribed) see only ciphertext and a hashed topic name. We connect
-// to several brokers at once and publish to all of them, so one being down doesn't matter.
+// to several brokers at once and publish to all of them, so one being down doesn't matter, and
+// start as soon as the first one answers — slow brokers join in when they're ready.
 
 import { MqttClient } from './mqtt.js';
 
 export const BROKERS = [
+  'wss://test.mosquitto.org:8081/mqtt',
   'wss://broker.emqx.io:8084/mqtt',
   'wss://broker.hivemq.com:8884/mqtt',
-  'wss://test.mosquitto.org:8081/mqtt',
 ];
 
 // No 0/O or 1/I: codes get read out loud and typed on phones.
@@ -33,6 +34,11 @@ export function parseRoomCode(text) {
   if (raw.length !== CODE_LENGTH) return null;
   for (const ch of raw) if (!CODE_ALPHABET.includes(ch)) return null;
   return raw;
+}
+
+/** First broker (in our order of preference) that both sides are connected to. */
+export function pickRelayBroker(mine, theirs) {
+  return BROKERS.find((b) => mine.includes(b) && theirs.includes(b)) ?? null;
 }
 
 const hex = (buf) => Array.from(new Uint8Array(buf), (b) => b.toString(16).padStart(2, '0')).join('');
@@ -57,56 +63,89 @@ export async function roomSecrets(code) {
   return { key, topic };
 }
 
-export async function seal(key, obj) {
+/** AES-GCM over raw bytes: 12-byte IV followed by ciphertext. */
+export async function sealBytes(key, bytes) {
   const iv = crypto.getRandomValues(new Uint8Array(12));
-  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, enc.encode(JSON.stringify(obj))));
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, bytes));
   const out = new Uint8Array(12 + ct.length);
   out.set(iv);
   out.set(ct, 12);
-  return toBase64(out);
+  return out;
 }
 
-/** Returns the decrypted object, or null for anything that isn't ours (wrong key, garbage). */
+/** Returns the plaintext bytes, or null for anything that isn't ours (wrong key, garbage). */
+export async function openBytes(key, bytes) {
+  try {
+    if (bytes.length < 28) return null;
+    return new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: bytes.subarray(0, 12) }, key, bytes.subarray(12)));
+  } catch {
+    return null;
+  }
+}
+
+export async function seal(key, obj) {
+  return toBase64(await sealBytes(key, enc.encode(JSON.stringify(obj))));
+}
+
 export async function open(key, text) {
   try {
-    const bytes = fromBase64(text);
-    const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: bytes.subarray(0, 12) }, key, bytes.subarray(12));
-    return JSON.parse(dec.decode(pt));
+    const pt = await openBytes(key, fromBase64(text));
+    return pt && JSON.parse(dec.decode(pt));
   } catch {
     return null;
   }
 }
 
 export class Signal {
+  /** Resolves as soon as one broker is connected; the others are added as they connect. */
   static async open(code, { brokers = BROKERS, timeout = 7000 } = {}) {
-    const [secrets, settled] = await Promise.all([
-      roomSecrets(code),
-      Promise.allSettled(brokers.map((url) => MqttClient.connect(url, { timeout }))),
-    ]);
-    const clients = settled.filter((s) => s.status === 'fulfilled').map((s) => s.value);
-    if (!clients.length) throw new Error('No signalling server is reachable from this network.');
-    return new Signal(clients, secrets);
+    const secrets = await roomSecrets(code);
+    const signal = new Signal(secrets);
+    await new Promise((resolve, reject) => {
+      let failed = 0;
+      for (const url of brokers) {
+        MqttClient.connect(url, { timeout }).then((c) => {
+          if (signal.closed) return c.close();
+          signal._add(url, c);
+          resolve();
+        }, () => {
+          if (++failed === brokers.length) reject(new Error('No signalling server is reachable from this network. Check your internet connection or try another network.'));
+        });
+      }
+    });
+    return signal;
   }
 
-  constructor(clients, { key, topic }) {
-    this.clients = clients;
+  constructor({ key, topic }) {
     this.key = key;
     this.topic = topic;
+    this.clients = new Map(); // url → MqttClient
     this.handlers = new Map();
     this.seen = new Set();
-    for (const c of clients) c.onMessage((t, payload) => this._receive(t, payload));
+    this.closed = false;
+  }
+
+  /** URLs of the brokers we're connected to right now. */
+  get brokers() {
+    return [...this.clients.keys()];
+  }
+
+  _add(url, client) {
+    this.clients.set(url, client);
+    client.onMessage((t, p) => this._receive(t, p.payload));
+    for (const t of this.handlers.keys()) client.subscribe(t);
   }
 
   /** Receive messages addressed to `box` (e.g. "host" or "g-<guest id>"). */
   listen(box, fn) {
     const t = `${this.topic}/${box}`;
     this.handlers.set(t, fn);
-    for (const c of this.clients) c.subscribe(t);
+    for (const c of this.clients.values()) c.subscribe(t);
   }
 
   async send(box, msg) {
     const data = await seal(this.key, { ...msg, mid: Math.random().toString(36).slice(2) });
-    for (const c of this.clients) c.publish(`${this.topic}/${box}`, data);
+    for (const c of this.clients.values()) c.publish(`${this.topic}/${box}`, data);
   }
 
   async _receive(topic, payload) {
@@ -119,8 +158,17 @@ export class Signal {
     fn(msg);
   }
 
+  /** Lend one broker connection to a relay link: close() will leave it open (the link owns it). */
+  pin(url) {
+    const c = this.clients.get(url);
+    if (c) c.pinned = true;
+    return c ?? null;
+  }
+
   close() {
-    for (const c of this.clients) c.close();
+    this.closed = true;
+    for (const c of this.clients.values()) if (!c.pinned) c.close();
+    this.clients.clear();
     this.handlers.clear();
   }
 }

@@ -56,11 +56,15 @@ const lobby = {
       const room = await hostRoom(code, {
         onGuest: (link) => {
           new CoopSession(game, link, 'host', { onEnd: (msg) => this.partnerGone(msg) });
-          ui.coopStatus('Your friend is here. Press Start when you are both ready.', 'good');
+          ui.coopStatus(`Your friend is here${link.kind === 'relay' ? ' (via relay)' : ''}. Press Start when you are both ready.`, 'good');
           ui.coopReady(true);
           audio.ui();
         },
-        onError: () => ui.coopStatus('Someone tried to join, but a direct connection failed. Ask them to try again.', 'bad'),
+        onStatus: (kind) => {
+          if (kind === 'connecting') ui.coopStatus('Your friend is connecting…', 'wait');
+          else if (kind === 'relay') ui.coopStatus('Direct connection blocked by the network. Connecting through the relay…', 'wait');
+          else if (kind === 'failed') ui.coopStatus('Your friend could not connect. They can simply try again; the room stays open.', 'bad');
+        },
       });
       if (this.code !== code) return room.close(); // went back while connecting
       this.room = room;
@@ -81,10 +85,10 @@ const lobby = {
     ui.coopBusy(true);
     ui.coopStatus('Connecting…', 'wait');
     try {
-      const link = await joinRoom(code);
+      const link = await joinRoom(code, { onStatus: (text) => this.code === code && ui.coopStatus(text, 'wait') });
       if (this.code !== code) return link.close();
       new CoopSession(game, link, 'guest', { onEnd: (msg) => this.partnerGone(msg) });
-      ui.coopStatus('Connected! Waiting for the host to press Start…', 'good');
+      ui.coopStatus(`Connected${link.kind === 'relay' ? ' via relay' : ''}! Waiting for the host to press Start…`, 'good');
     } catch (err) {
       ui.coopStatus(err.message, 'bad');
     } finally {

@@ -23,7 +23,7 @@ Most browser games lean on Phaser, Pixi or Three.js. VOID PULSE uses **none** of
   - *Hydra Core*: radial bursts, spirals, aimed volleys and summons;
   - *Laser Warden*: telegraphed laser beams that sweep the arena (two, then four), bullet flowers and dodger escorts;
   - *Brood Mother*: pours out swarms of minis, winds up, and rams the nearest pilot, bursting into a bullet ring on impact.
-- **Roguelite build-crafting.** 21 augments across 4 rarities, offered as a pick of 3 between waves. Legendaries enter the pool from wave 4: *Bullet Storm* (every 4th volley is a 16-shot ring), *Phoenix Core* (survive one fatal hit in a blast) and *Chronos* (dashing slows every enemy). New epics include rear guns, a periodic *Nova Pulse* shockwave and a recharging *Aegis Shield*. In co-op each pilot picks their own.
+- **Roguelite build-crafting.** 21 augments across 4 rarities, offered as a pick of 3 between waves. Epics show up in about 1 offer in 10 and never more than one per offer; legendaries are rarer still and enter the pool from wave 6: *Bullet Storm* (every 4th volley is a 16-shot ring), *Phoenix Core* (survive one fatal hit in a blast) and *Chronos* (dashing slows every enemy). New epics include rear guns, a periodic *Nova Pulse* shockwave and a recharging *Aegis Shield*. In co-op each pilot picks their own.
 - **Daily run.** A seed derived from the UTC date gives every player on Earth the same waves and the same upgrade offers.
 - **Game feel.** Hit-stop, trauma-based screen shake, a warping background grid, bloom, a score multiplier fed by shards, and a "mercy blast" so a single hit never chains into an instant second death.
 - **Every input device.** Keyboard + mouse, gamepad (standard mapping, including menu navigation) and dual floating virtual sticks on touch screens.
@@ -52,6 +52,7 @@ sequenceDiagram
 ```
 
 - **No game server.** GitHub Pages only serves static files, so the two browsers find each other through public MQTT brokers ([`mqtt.js`](src/net/mqtt.js) is a ~150-line MQTT 3.1.1 client), swap one WebRTC offer and answer, then talk directly. Signalling goes to three brokers at once, so one being down doesn't matter. Messages are encrypted with a key derived from the room code, and the topic is a hash of the code, so the brokers see only ciphertext ([`signal.js`](src/net/signal.js)).
+- **Relay fallback.** Some networks (symmetric NAT and CGNAT, common on mobile carriers) make a direct connection impossible. If no direct path opens within 6 s, both sides switch to a relay through a broker they share ([`relay.js`](src/net/relay.js)). It uses the same interface as the WebRTC link, so the game code doesn't change. Traffic is still encrypted with the room key, snapshots are deflate-compressed and sent at 12 Hz instead of 30, and a snapshot is skipped rather than queued when the broker connection backs up. The lobby says which path you got, and so does the HUD.
 - **Host-authoritative simulation.** The host runs the real game (enemies, bullets, damage, scoring, upgrades) and streams a quantised binary snapshot ([`codec.js`](src/net/codec.js)). Positions and velocities are int16 and angles are int16 × 10⁻⁴. Of each enemy's behaviour state, only the fields its type declares in `sync` are sent, because those are all `draw()` needs. A late-game frame with 150 enemies and 1,000 bullets is under 20 KB; a typical one is a few KB.
 - **No input lag for the guest.** The guest flies its own ship locally and reports position, aim and trigger; the host fires the guest's guns from that report. Everything else is extrapolated along its velocity between snapshots and eased toward the newest one ([`coop.js`](src/net/coop.js)).
 - **Same effects on both screens.** On the host, particle, grid, audio and banner calls go through a recording proxy ([`fx-record.js`](src/game/fx-record.js)), and the guest replays the batch on its own systems. Purely local effects (engine trails, grid wakes) bypass it and are recomputed on each side.
@@ -117,7 +118,7 @@ Otherwise, note that ES modules must be served over HTTP (opening `index.html` f
 
 ```bash
 npm start          # zero-dependency dev server → http://localhost:5173
-npm test           # 49 tests on Node's built-in test runner
+npm test           # 57 tests on Node's built-in test runner
 ```
 
 Any static server works too, for example `python -m http.server`.
@@ -131,10 +132,11 @@ Any static server works too, for example `python -m http.server`.
 - particle capacity, motion and swap-remove packing;
 - wave plans: budget, unlock order, boss cadence, and determinism per seed;
 - spawn formations: always inside the arena and at a safe distance from every pilot;
-- upgrade rolls: no duplicates, no maxed upgrades, rarity distribution, legendaries held back until wave 4;
+- upgrade rolls: no duplicates, no maxed upgrades, rarity distribution, at most one epic or legendary per offer, legendaries held back until wave 6, and the measured odds over simulated runs;
 - bosses: each of the three survives 25 s of its own pattern, enrages at half health and dies cleanly; laser hitboxes;
 - the co-op wire format (snapshot and input round-trips, size budget), MQTT packet framing across split chunks, room codes and encrypted signalling;
 - a full co-op session between two in-memory games;
+- the relay link over an in-memory broker: message order through async encryption, compressed snapshots, back-pressure, wrong-key messages, goodbye;
 - PRNG uniformity, angle wrapping, and frame-rate-independent damping.
 
 [GitHub Actions](.github/workflows/ci.yml) runs the tests on Node 22 and 24 for every push and PR, then deploys `main` to GitHub Pages.

@@ -64,7 +64,8 @@ export function parsePackets(buf) {
       const tl = (body[0] << 8) | body[1];
       p.topic = dec.decode(body.subarray(2, 2 + tl));
       const qos = (type >> 1) & 3;
-      p.payload = dec.decode(body.subarray(2 + tl + (qos ? 2 : 0)));
+      p.bytes = body.slice(2 + tl + (qos ? 2 : 0));
+      Object.defineProperty(p, 'payload', { get: () => dec.decode(p.bytes), enumerable: true });
     } else if (p.type === 2) {
       p.returnCode = body[1];
     }
@@ -122,9 +123,16 @@ export class MqttClient {
     this._send(publishPacket(topic, payload));
   }
 
+  /** `fn(topic, packet)`: `packet.bytes` is the raw payload, `packet.payload` decodes it as UTF-8. */
   onMessage(fn) {
     this.handlers.add(fn);
     return () => this.handlers.delete(fn);
+  }
+
+  unsubscribe(topic) {
+    const body = [this._id >> 8, this._id & 255, ...str(topic)];
+    this._id++;
+    this._send(packet(0xa2, body));
   }
 
   close() {
@@ -150,7 +158,7 @@ export class MqttClient {
         this._onConnack = null;
         this._ping = setInterval(() => this._send(new Uint8Array([0xc0, 0])), 20000);
       } else if (p.type === 3) {
-        for (const fn of this.handlers) fn(p.topic, p.payload);
+        for (const fn of this.handlers) fn(p.topic, p);
       }
     }
   }

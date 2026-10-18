@@ -13,8 +13,8 @@ import { singularityPull } from '../game/enemies.js';
 import { UPGRADE_BY_ID } from '../game/upgrades.js';
 import { clamp, damp } from '../engine/math.js';
 
-const SNAPSHOT_HZ = 30;
-const INPUT_HZ = 60;
+// Over the relay (public MQTT broker) we send less, to stay well inside its rate limits.
+const RATES = { direct: { snapshot: 30, input: 60 }, relay: { snapshot: 12, input: 20 } };
 const RUN_STATES = new Set(['playing', 'paused', 'upgrade', 'dying']);
 
 /** Host-side stand-in for the guest's controller, fed by the guest's 60 Hz reports. */
@@ -65,6 +65,7 @@ export class RemoteInput {
 export class CoopSession {
   constructor(game, link, role, { onEnd } = {}) {
     Object.assign(this, { g: game, link, role, onEnd });
+    this.rates = RATES[link.kind] ?? RATES.direct;
     this.remoteInput = new RemoteInput();
     this.sendT = 0;
     this.inputT = 0;
@@ -136,7 +137,7 @@ export class CoopSession {
   hostUpdate(dt) {
     const g = this.g;
     this.meter(dt);
-    if ((this.sendT += dt) < 1 / SNAPSHOT_HZ) return;
+    if ((this.sendT += dt) < 1 / this.rates.snapshot) return;
     this.sendT = 0;
     if (g.outbox.list.length) {
       const msg = JSON.stringify({ t: 'fx', list: g.outbox.list });
@@ -413,7 +414,7 @@ export class CoopSession {
     g.updateFx(dt);
     g.audio.setIntensity(g.state === 'dying' ? 0.1 : g.boss ? 1 : clamp(0.3 + g.enemies.length / 35 + g.wave * 0.03, 0, 0.95));
 
-    if ((this.inputT += dt) >= 1 / INPUT_HZ) {
+    if ((this.inputT += dt) >= 1 / this.rates.input) {
       this.inputT = 0;
       const buf = encodeInput({
         seq: ++this.seq, x: me.x, y: me.y, vx: me.vx, vy: me.vy, aim: me.aim, dashT: me.dashT, dashX: me.dashX, dashY: me.dashY,
