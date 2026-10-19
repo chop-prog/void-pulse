@@ -5,7 +5,9 @@
 // effects (explosions, sounds, rings, banners), all stamped with the host's simulation clock.
 //
 // The guest flies its own ship locally (no input lag) and reports its position, aim and trigger;
-// the host fires the guest's guns from those reports and smooths the ship between them.
+// the host fires the guest's guns from those reports and smooths the ship between them. The guest
+// also fires visual copies of its own shots the moment the trigger is pulled, so shooting never
+// feels late; the host's copies do the damage and are left out of the guest's picture.
 //
 // Everything else on the guest is shown slightly in the past, interpolated between two buffered
 // snapshots — the standard netcode answer to jitter. Packets over the internet arrive unevenly
@@ -16,7 +18,7 @@
 // against what it sees, so a bullet that visibly missed never counts.
 
 import { encodeSnapshot, decodeSnapshot, encodeInput, decodeInput, messageKind, KIND_SNAPSHOT, KIND_INPUT } from './codec.js';
-import { createPlayer, movePlayer, trailPlayer, clampToArena } from '../game/player.js';
+import { createPlayer, movePlayer, trailPlayer, clampToArena, shootPlayer } from '../game/player.js';
 import { singularityPull } from '../game/enemies.js';
 import { UPGRADE_BY_ID } from '../game/upgrades.js';
 import { clamp, damp, lerp, angleDiff } from '../engine/math.js';
@@ -114,6 +116,10 @@ export class CoopSession {
     this.offset = null; // host clock − local clock, smoothed
     this.jitter = 0;
     this.renderTime = 0;
+    this.ownBullets = []; // guest: our shots, drawn the moment we fire
+    this.partnerBullets = []; // guest: the host's bullets from the snapshot, minus our own
+    // Where firePlayer puts the guest's shots: our list, unrecorded effects and sound.
+    this.shooter = { bullets: this.ownBullets, particles: game.localFx.particles, audio: game.rawAudio };
     this.respawnTick = 0; // snapshots older than this can't tell us whether we're alive
     this.bytes = 0;
     this.bytesPerSec = 0;
@@ -274,6 +280,8 @@ export class CoopSession {
     me.stats = m.stats;
     me.owned = m.owned;
     Object.assign(g, { score: 0, mult: 1, kills: 0, wave: 1, runTime: 0, orbAngle: 0, slowT: 0 });
+    this.ownBullets.length = 0;
+    this.partnerBullets = [];
     this.snap = null;
     this.offer = null;
     this.enemyById.clear();
@@ -463,7 +471,7 @@ export class CoopSession {
       o.y = o.y0 + o.vy * since;
       o.a = (o.x0 + o.y0) * 0.01 + rt * 4;
     }
-    g.bullets = a.bullets;
+    this.partnerBullets = a.bullets.filter((o) => o.owner !== g.localSlot); // ours are drawn locally
     g.enemyBullets = a.enemyBullets;
     g.geoms = a.geoms;
 
@@ -485,6 +493,59 @@ export class CoopSession {
     }
   }
 
+  /**
+   * Fly our own shots as we see the world: straight lines, walls, homing and enemy contact. Purely
+   * visual — the host's copies, fired from our reports, deal the damage and send the explosions.
+   */
+  updateOwnBullets(dt) {
+    const g = this.g;
+    const { W, H } = g.arena;
+    const list = this.ownBullets;
+    for (let i = list.length - 1; i >= 0; i--) {
+      const b = list[i];
+      b.life -= dt;
+      if (b.homing > 0) {
+        let best = null;
+        let bd = 320 * 320;
+        for (const e of g.enemies) {
+          const d2 = (e.x - b.x) ** 2 + (e.y - b.y) ** 2;
+          if (d2 < bd) { bd = d2; best = e; }
+        }
+        if (best) {
+          const cur = Math.atan2(b.vy, b.vx);
+          const turn = clamp(angleDiff(cur, Math.atan2(best.y - b.y, best.x - b.x)), -b.homing * dt, b.homing * dt);
+          const sp = Math.hypot(b.vx, b.vy);
+          b.vx = Math.cos(cur + turn) * sp;
+          b.vy = Math.sin(cur + turn) * sp;
+        }
+      }
+      b.x += b.vx * dt;
+      b.y += b.vy * dt;
+      let wall = false;
+      if (b.x < 0) { b.x = 0; b.vx = -b.vx; wall = true; } else if (b.x > W) { b.x = W; b.vx = -b.vx; wall = true; }
+      if (b.y < 0) { b.y = 0; b.vy = -b.vy; wall = true; } else if (b.y > H) { b.y = H; b.vy = -b.vy; wall = true; }
+      if (wall) {
+        if (b.bounces > 0) {
+          b.bounces--;
+          b.hits.length = 0;
+        } else b.life = 0;
+      }
+      if (b.life > 0) {
+        for (const e of g.enemies) {
+          const rr = e.r + b.r;
+          if (b.hits.includes(e.id) || (e.x - b.x) ** 2 + (e.y - b.y) ** 2 > rr * rr) continue;
+          b.hits.push(e.id);
+          if (b.pierce > 0) b.pierce--;
+          else { b.life = 0; break; }
+        }
+      }
+      if (b.life <= 0) {
+        list[i] = list[list.length - 1];
+        list.pop();
+      }
+    }
+  }
+
   guestUpdate(dt) {
     const g = this.g;
     const input = g.input;
@@ -494,6 +555,7 @@ export class CoopSession {
       else if (g.state === 'paused') this.request({ t: 'resume' });
     }
     if (!RUN_STATES.has(g.state)) {
+      this.ownBullets.length = 0;
       this.flushFx();
       if (g.state === 'gameover') g.updateFx(dt);
       else g.updateAmbient(dt);
@@ -526,12 +588,14 @@ export class CoopSession {
     if (me.alive && g.state === 'playing') {
       me.invuln = Math.max(0, me.invuln - dt);
       me.dashCd = Math.max(0, me.dashCd - dt);
+      me.fireCd -= dt;
       const cd = me.dashCd;
       const aim = movePlayer(g, me, input, dt);
       if (me.dashCd > cd) this.dashSeq++;
       for (const e of g.singularities) singularityPull(e, me, dt);
       clampToArena(g, me);
       this.fire = aim.fire;
+      shootPlayer(this.shooter, me, this.fire);
       // Hits on our ship are judged against what we see, then confirmed by the host.
       if (me.invuln <= 0 && me.dashT <= 0) {
         g.buildHash();
@@ -541,6 +605,8 @@ export class CoopSession {
         }
       }
     }
+    if (g.state === 'playing' || g.state === 'dying') this.updateOwnBullets(dt);
+    g.bullets = this.partnerBullets.concat(this.ownBullets);
     for (const p of g.players) if (p.alive) trailPlayer(g, p, dt);
     for (const e of g.singularities) g.localFx.grid.applyForce(e.x, e.y, 260, -700 * dt);
 

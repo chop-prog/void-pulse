@@ -156,6 +156,10 @@ function bullet(g, p, a, crit, scale = 1) {
 
 function firePlayer(g, p) {
   const s = p.stats;
+  // A co-op guest sees its own muzzle flash and hears its own shot the instant it fires, so the
+  // host keeps those local instead of recording them for the guest (they would play twice, late).
+  const particles = p.remote ? g.localFx.particles : g.particles;
+  const audio = p.remote ? g.rawAudio : g.audio;
   const n = s.projectiles;
   const spread = n > 1 ? Math.min(0.14, 0.5 / n) : 0;
   for (let i = 0; i < n; i++) bullet(g, p, p.aim + (i - (n - 1) / 2) * spread + (Math.random() - 0.5) * 0.03, Math.random() < s.crit);
@@ -163,16 +167,16 @@ function firePlayer(g, p) {
   p.volleys++;
   if (s.storm && p.volleys % STORM_EVERY === 0) {
     for (let i = 0; i < STORM_SHOTS; i++) bullet(g, p, p.aim + (i * TAU) / STORM_SHOTS, Math.random() < s.crit);
-    g.particles.emit(p.x, p.y, { count: STORM_SHOTS, color: '#ffd84d', speed: 320, life: 0.3 });
+    particles.emit(p.x, p.y, { count: STORM_SHOTS, color: '#ffd84d', speed: 320, life: 0.3 });
   }
-  g.particles.emit(p.x + Math.cos(p.aim) * 18, p.y + Math.sin(p.aim) * 18, {
+  particles.emit(p.x + Math.cos(p.aim) * 18, p.y + Math.sin(p.aim) * 18, {
     count: 2, color: '#9ff7ff', speed: 260, speedMin: 80, life: 0.12, lifeMin: 0.05, angle: p.aim, spread: 0.7,
   });
   if (!p.remote) {
     p.vx -= Math.cos(p.aim) * 10;
     p.vy -= Math.sin(p.aim) * 10;
   }
-  g.audio.shoot();
+  audio.shoot();
 }
 
 const SHIP = [[18, 0], [-10, -12], [-4, 0], [-10, 12]];

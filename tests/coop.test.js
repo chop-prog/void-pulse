@@ -42,7 +42,13 @@ function memoryStorage() {
   return { get: (k, d) => (m.has(k) ? m.get(k) : d), set: (k, v) => m.set(k, v) };
 }
 
-const makeGame = () => new Game({ renderer: null, input: stubInput(), audio: silentAudio, ui: stubUI(), settings: { shake: false }, storage: memoryStorage() });
+const makeGame = (audio = silentAudio) => new Game({ renderer: null, input: stubInput(), audio, ui: stubUI(), settings: { shake: false }, storage: memoryStorage() });
+
+/** Audio stub that counts how often each sound plays. */
+function countingAudio() {
+  const counts = {};
+  return { counts, audio: new Proxy({}, { get: (t, name) => () => { counts[name] = (counts[name] ?? 0) + 1; } }) };
+}
 
 /**
  * Two connected fake links over a simulated network. Messages are serialised like the real
@@ -88,9 +94,9 @@ function linkPair(clock, lag = () => 0) {
   return [a, b, deliver];
 }
 
-function coop({ lag } = {}) {
+function coop({ lag, guestAudio } = {}) {
   const host = makeGame();
-  const guest = makeGame();
+  const guest = makeGame(guestAudio);
   const clock = { t: 0 };
   const now = () => clock.t;
   const [a, b, deliver] = linkPair(clock, lag);
@@ -154,7 +160,30 @@ test('the guest flies its own ship and the host fires its guns', () => {
   assert.ok(guest.player.x > x0 + 120, 'guest ship moved locally');
   assert.ok(Math.abs(host.players[1].x - guest.player.x) < 15, 'host follows the guest\'s reports');
   assert.ok(host.bullets.some((b) => b.owner === 1), 'host spawned the guest\'s bullets');
-  assert.ok(guest.bullets.some((b) => b.owner === 1), 'and they come back in snapshots');
+  assert.ok(guest.bullets.some((b) => b.owner === 1), 'and the guest sees them');
+});
+
+test('the guest\'s shots leave its ship at once, even over a slow network, and sound once', () => {
+  const { counts, audio } = countingAudio();
+  const { host, guest, run } = coop({ lag: () => 0.08, guestAudio: audio });
+  run(0.5); // let the start message and the first snapshots arrive
+  for (const e of host.enemies) e.dead = true;
+  host.director.groups = [];
+  counts.shoot = 0;
+  guest.input.aim = { x: 0, y: -1, fire: true };
+  run(1 / 120);
+  const mine = guest.bullets.filter((b) => b.owner === 1);
+  assert.ok(mine.length > 0, 'a shot appears on the very next frame');
+  const me = guest.player;
+  assert.ok(mine.every((b) => Math.hypot(b.x - me.x, b.y - me.y) < 40), 'from the ship, not from where the host last saw it');
+  assert.ok(mine.every((b) => b.vy < 0), 'in the aimed direction');
+
+  run(1);
+  const shots = counts.shoot;
+  assert.ok(shots >= 8 && shots <= 11, `one sound per volley at 9 shots/s, heard ${shots}`);
+  const ids = guest.bullets.filter((b) => b.owner === 1);
+  assert.ok(ids.length <= 11, `no doubled bullets: ${ids.length} on screen`);
+  assert.ok(host.bullets.some((b) => b.owner === 1), 'the host still fires the real, damaging shots');
 });
 
 test('a downed pilot returns next wave; upgrades wait for both; game over needs both down', () => {
